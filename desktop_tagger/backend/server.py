@@ -14,9 +14,18 @@ request 裡面悶著頭下載（下載可能要一段時間，讓呼叫端自己
 """
 import glob
 import os
+import re
 import sys
 
 from flask import Flask, jsonify, request
+
+# 模型名稱只給英數字/底線/連字號，不接受路徑分隔符或 ".."——get_model()
+# 會直接拿這個字串去 os.path.join 組路徑，沒有這層檢查的話，/tag 的
+# model 欄位（純使用者輸入，這支 server 沒有任何驗證/CORS/CSRF 保護，
+# 同機器上其他 process、甚至瀏覽器頁面的 blind cross-origin POST 都打得
+# 到 127.0.0.1:5111）可以塞 "../../../某路徑" 之類的字串做路徑穿越，
+# 誘騙這支程式把任意目錄當模型載入。
+_SAFE_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # PyInstaller 打包後，資源檔案會被解到 sys._MEIPASS；開發時直接用這個
 # 檔案所在目錄。（模型本身不在這裡面，是執行期間下載到使用者資料夾。）
@@ -101,6 +110,8 @@ def _manifest_entry(name):
 
 
 def get_model(name):
+    if not name or not _SAFE_MODEL_NAME_RE.match(name):
+        raise FileNotFoundError(name)
     if name not in _model_cache:
         path = os.path.join(model_downloader.get_cache_dir(), name)
         if not os.path.isfile(os.path.join(path, "config.json")):
