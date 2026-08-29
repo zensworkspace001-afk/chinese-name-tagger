@@ -34,6 +34,7 @@ import re
 import shutil
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -42,6 +43,18 @@ import zipfile
 # 但 manifest 是放在 GitHub 上、透過網路抓的，多一層檢查總是比較保險）
 # 被拿去 os.path.join 組出跳出 cache_dir 的路徑。
 _SAFE_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# manifest 裡的下載連結只信任 GitHub 自己的網域——manifest 本身雖然也是
+# 放在 GitHub、理論上跟下載連結同一個信任層級，但多這道檢查可以防住
+# 「manifest 被偷改一個欄位（例如混在一堆正常修改裡的惡意 PR），把
+# url 換成完全不同網域」這種比整個帳號被盜還低門檻的攻擊，檢查成本
+# 幾乎是零，值得加。
+_ALLOWED_DOWNLOAD_HOSTS = {"github.com", "raw.githubusercontent.com", "objects.githubusercontent.com"}
+
+# 解壓前檢查 zip 裡宣告的總解壓後大小，擋 zip bomb（很小的壓縮檔、解開後
+# 卻是超巨大的內容，撐爆磁碟）。目前兩個模型加起來還不到 1GB，這裡抓
+# 3GB 當上限，留了不少空間給以後的模型版本，又不會大到失去防護意義。
+_MAX_UNCOMPRESSED_BYTES = 3 * 1024 * 1024 * 1024
 
 MANIFEST_URL = (
     "https://raw.githubusercontent.com/zensworkspace001-afk/"
@@ -101,10 +114,16 @@ def _safe_extract(zf, dest_dir):
     資料夾以外的地方）。Python 的 zipfile.extractall 對這個問題有做一些
     處理，但版本間行為不完全一致，這裡自己再明確檢查一次比較保險。"""
     dest_real = os.path.realpath(dest_dir)
-    for member in zf.namelist():
-        target = os.path.realpath(os.path.join(dest_real, member))
+    total_uncompressed = 0
+    for info in zf.infolist():
+        target = os.path.realpath(os.path.join(dest_real, info.filename))
         if target != dest_real and not target.startswith(dest_real + os.sep):
-            raise ValueError(f"zip 檔內容可疑（疑似 zip-slip）：{member!r}")
+            raise ValueError(f"zip 檔內容可疑（疑似 zip-slip）：{info.filename!r}")
+        total_uncompressed += info.file_size
+    if total_uncompressed > _MAX_UNCOMPRESSED_BYTES:
+        raise ValueError(
+            f"zip 解壓後大小異常（{total_uncompressed} bytes，疑似 zip bomb）"
+        )
     zf.extractall(dest_real)
 
 
@@ -117,6 +136,9 @@ def download_and_extract(model_entry, cache_dir, progress_cb=None):
     if not _SAFE_MODEL_NAME_RE.match(name):
         raise ValueError(f"模型名稱格式不合法：{name!r}")
     url = model_entry["url"]
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_DOWNLOAD_HOSTS:
+        raise ValueError(f"下載連結網域不在允許清單內：{url!r}")
     expected_sha256 = model_entry["sha256"]
     model_dir = os.path.join(cache_dir, name)
 
