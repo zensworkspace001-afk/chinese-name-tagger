@@ -1,0 +1,22 @@
+{
+  "models": [
+    {
+      "name": "model_bert_colab_v5",
+      "label": "colab_v5（目前最佳版本）",
+      "version": 1,
+      "url": "https://github.com/zensworkspace001-afk/chinese-name-tagger/releases/download/models-v1/model_bert_colab_v5.zip",
+      "sha256": "39eb73eb242d0c0c3095c3acd82e9de10a969e85a5bab13c621e71ce1f523ad9",
+      "size_bytes": 377346790,
+      "default": true
+    },
+    {
+      "name": "model_bert_v4",
+      "label": "v4（原始推薦版本）",
+      "version": 1,
+      "url": "https://github.com/zensworkspace001-afk/chinese-name-tagger/releases/download/models-v1/model_bert_v4.zip",
+      "sha256": "99393e8ca33a4659a564292be91bbb507c50db46cf601d7bb6ae63ecf53c81d4",
+      "size_bytes": 377348201,
+      "default": false
+    }
+  ]
+}

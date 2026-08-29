@@ -1,0 +1,49 @@
+name: Build Windows desktop tagger
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "desktop_tagger/**"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout (with Git LFS models)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies (CPU-only torch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers flask pyinstaller pystray keyboard pyperclip pillow
+
+      - name: Build with PyInstaller
+        working-directory: desktop_tagger/windows
+        run: pyinstaller ChineseNameTagger.spec --noconfirm
+
+      - name: Package installer zip
+        working-directory: desktop_tagger/windows
+        run: |
+          mkdir package
+          Copy-Item -Recurse dist/ChineseNameTagger package/ChineseNameTagger
+          Copy-Item install_windows.ps1 package/install_windows.ps1
+          Copy-Item ..\README.md package/README.md -ErrorAction SilentlyContinue
+          Compress-Archive -Path package/* -DestinationPath ChineseNameTaggerWindows.zip
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChineseNameTaggerWindows
+          path: desktop_tagger/windows/ChineseNameTaggerWindows.zip
+          retention-days: 30
