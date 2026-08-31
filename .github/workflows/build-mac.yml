@@ -54,13 +54,21 @@ jobs:
         working-directory: desktop_tagger/mac
         run: pyinstaller ChineseNameTagger.spec --noconfirm
 
-      - name: Package zip (app + installer script + LaunchAgent plist)
+      - name: Package zip (app + installer + LaunchAgent plist)
         working-directory: desktop_tagger/mac
         run: |
           mkdir -p package
           cp -R dist/ChineseNameTagger.app package/
-          cp install_mac.sh package/
           cp com.zens.chinesetagger.plist package/
+          # install_mac.command 是給一般使用者用的：Finder 對 .command 副檔名
+          # 會直接開 Terminal 執行，不用自己打指令、也看得到跳出來的原生
+          # 對話框（安裝前確認、安裝完成/失敗提示）。內容跟 install_mac.sh
+          # 完全一樣，只是複製一份換副檔名，方便雙擊。
+          cp install_mac.sh package/install_mac.command
+          chmod +x package/install_mac.command
+          # install_mac.sh 本身也留著，給想直接看 Terminal 輸出、或已經
+          # 知道怎麼用指令列的人。
+          cp install_mac.sh package/
           chmod +x package/install_mac.sh
           # 用 ditto（不是 zip）壓，才能正確保留 .app bundle 的資源分岔/
           # 擴充屬性，避免 CI 產出的 zip 在別人電腦上解壓縮後 App 損毀。
