@@ -1,17 +1,29 @@
-## 安裝方式
+## 安裝方式（推薦：用 Terminal）
 1. 下載並解壓縮 `ChineseNameTaggerMac.zip`
-2. 雙擊解壓縮出來的資料夾裡的 **`install_mac.command`**
-   （Finder 會自動開一個 Terminal 視窗跑安裝程式，過程中會跳出原生視窗
-   確認安裝內容、安裝完成後也會跳出提示）
+2. 打開 Terminal，`cd` 到解壓縮出來的資料夾，執行：
+   ```
+   ./install_mac.sh
+   ```
+   會跳出原生視窗確認安裝內容、裝完也會跳出完成提示。
 
-如果比較習慣打指令，也可以用 Terminal `cd` 進資料夾後執行 `./install_mac.sh`，
-效果完全一樣（只是不方便雙擊）。
+用 Terminal 執行是因為**不會**經過 Finder 的下載檔案檢查，不會卡在
+Gatekeeper 警告，是目前測起來最順的方式。
+
+### 也可以雙擊安裝（`install_mac.command`）
+資料夾裡也有 `install_mac.command`，雙擊會自動開 Terminal 執行、效果跟上面
+完全一樣。但因為是透過 Finder 開啟下載下來的檔案，**第一次雙擊可能會被
+Gatekeeper 擋下來**，跳出「Apple 無法驗證此 App 是否包含惡意軟體」。
+如果遇到，回到 Terminal（`cd` 到同一個資料夾）執行：
+```
+xattr -dr com.apple.quarantine .
+```
+再雙擊一次，或改用上面的 `./install_mac.sh` 方式。
 
 ## 這個 App 沒有 Apple 開發者簽章
 這是免費的個人小工具，沒有加入付費的 Apple Developer Program，所以沒有
-官方簽章/公證。安裝程式裝好時會自動處理這件事，一般情況下不會再看到
-「無法驗證開發者」的警告。如果選單列圖示一直卡在「啟動中」沒變成
-「已就緒」，在 Terminal 執行：
+官方簽章/公證。`install_mac.sh` 裝好 App 時會自動解除隔離屬性，一般情況下
+選單列圖示會直接正常啟動。如果圖示一直卡在「啟動中」沒變成「已就緒」，
+在 Terminal 執行：
 ```
 xattr -dr com.apple.quarantine /Applications/ChineseNameTagger.app
 ```
