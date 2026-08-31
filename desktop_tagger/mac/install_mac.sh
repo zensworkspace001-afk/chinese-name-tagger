@@ -20,9 +20,22 @@ LOG_DIR="$HOME/Library/Logs/ChineseNameTagger"
 LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
 LABEL="com.zens.chinesetagger"
 
-if [ ! -d "$HERE/dist/ChineseNameTagger.app" ]; then
-  echo "找不到 dist/ChineseNameTagger.app，請先執行：" >&2
+# 這支 script 有兩種用法，App 可能在兩個不同的地方：
+#   1. 本機開發：cd desktop_tagger/mac && ./install_mac.sh，這時候
+#      App 是本機剛用 pyinstaller 建出來的 dist/ChineseNameTagger.app。
+#   2. 從 GitHub Release 下載的 zip 解壓縮後直接執行：CI 打包時是把
+#      dist/ChineseNameTagger.app 跟 install_mac.sh 攤平放在同一層
+#      （沒有 dist/ 這層目錄），這時候 App 就在 script 自己旁邊。
+if [ -d "$HERE/dist/ChineseNameTagger.app" ]; then
+  APP_SRC="$HERE/dist/ChineseNameTagger.app"
+elif [ -d "$HERE/ChineseNameTagger.app" ]; then
+  APP_SRC="$HERE/ChineseNameTagger.app"
+else
+  echo "找不到 ChineseNameTagger.app。" >&2
+  echo "如果你是要在本機重新打包，請先執行：" >&2
   echo "  ./build_venv/bin/pyinstaller ChineseNameTagger.spec --noconfirm" >&2
+  echo "如果你是從 GitHub Release 下載的 zip，請確認解壓縮後" >&2
+  echo "ChineseNameTagger.app 有跟 install_mac.sh 放在同一層資料夾。" >&2
   exit 1
 fi
 
@@ -32,7 +45,7 @@ pkill -f "ChineseNameTagger.app/Contents/MacOS/ChineseNameTagger" 2>/dev/null ||
 
 echo "==> 安裝 App 到 $INSTALL_DIR"
 rm -rf "$INSTALL_DIR/ChineseNameTagger.app"
-cp -R "$HERE/dist/ChineseNameTagger.app" "$INSTALL_DIR/"
+cp -R "$APP_SRC" "$INSTALL_DIR/"
 # 注意：不要在這裡動 ~/Library/Application Support/ChineseNameTagger ——
 # 單一執行個體鎖檔（.instance.lock）放在那裡，如果舊 process 還在跑、
 # 這裡把那個目錄砍掉重建，會讓舊 process 手上的 flock 變成鎖在一個已經
