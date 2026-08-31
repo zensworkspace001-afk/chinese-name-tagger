@@ -21,7 +21,13 @@
 	<string>__LOG_DIR__/server.log</string>
 	<key>StandardErrorPath</key>
 	<string>__LOG_DIR__/server.log</string>
+	<!-- "Background" 讓 launchd/kernel 把這個 process 排在跟前景互動式
+	     App 完全不搶 CPU 的低優先權（實測：ps -o pri 量到只有 4，一般
+	     前景 App 是 31 左右），這支 App 雖然大部分時間是選單列常駐，
+	     但偶爾會跳出真正要跟使用者互動的視窗（標記結果），Background
+	     會讓那個視窗（尤其是捲動這種需要連續、即時回應的操作）持續卡頓
+	     ——換成 Interactive 之後同一台機器上量到的優先權變成 37。 -->
 	<key>ProcessType</key>
-	<string>Background</string>
+	<string>Interactive</string>
 </dict>
 </plist>

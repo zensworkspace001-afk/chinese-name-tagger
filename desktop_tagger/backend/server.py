@@ -42,6 +42,7 @@ from predict_bert import (  # noqa: E402
     split_sentences_keep_punct,
 )
 import model_downloader  # noqa: E402
+from index_html import INDEX_HTML  # noqa: E402
 
 DEFAULT_MODEL = "model_bert_colab_v5"
 PORT = 5111
@@ -118,6 +119,11 @@ def get_model(name):
             raise FileNotFoundError(name)
         _model_cache[name] = load_model(path)
     return _model_cache[name]
+
+
+@app.route("/")
+def index():
+    return INDEX_HTML
 
 
 @app.route("/health")

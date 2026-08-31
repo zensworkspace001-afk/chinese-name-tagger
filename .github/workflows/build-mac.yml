@@ -1,0 +1,91 @@
+name: Build macOS desktop tagger
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "desktop_tagger/**"
+      - ".github/workflows/build-mac.yml"
+    tags:
+      - "mac-v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # 推 mac-v* tag 時要能建立 GitHub Release
+
+jobs:
+  build:
+    # macos-14 = Apple Silicon (arm64) hosted runner，跟本機打包出來的
+    # 架構一致（PyInstaller 不能跨架構打包，intel Mac 要另外用 macos-13
+    # runner 開一個 job，這裡先只做 arm64）。
+    runs-on: macos-14
+    steps:
+      - name: Checkout (with Git LFS)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 版本都釘死成跟本機打包驗證過的組合一致，避免 CI 上因為套件版本
+      # 漂移，打包出來的行為（尤其是 PyObjC/WebKit 這種跟系統框架綁很緊
+      # 的東西）跟本機測過的不一樣。
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install torch==2.13.0
+          pip install \
+            transformers==4.57.6 \
+            flask==3.1.3 \
+            pyinstaller==6.22.2 \
+            rumps==0.4.0 \
+            pynput==1.8.2 \
+            pyobjc-core==12.2.2 \
+            pyobjc-framework-Cocoa==12.2.2 \
+            pyobjc-framework-WebKit==12.2.2 \
+            pyobjc-framework-Quartz==12.2.2 \
+            pyobjc-framework-ApplicationServices==12.2.2 \
+            pyobjc-framework-CoreText==12.2.2
+
+      - name: Build with PyInstaller
+        working-directory: desktop_tagger/mac
+        run: pyinstaller ChineseNameTagger.spec --noconfirm
+
+      - name: Package zip (app + installer script + LaunchAgent plist)
+        working-directory: desktop_tagger/mac
+        run: |
+          mkdir -p package
+          cp -R dist/ChineseNameTagger.app package/
+          cp install_mac.sh package/
+          cp com.zens.chinesetagger.plist package/
+          chmod +x package/install_mac.sh
+          # 用 ditto（不是 zip）壓，才能正確保留 .app bundle 的資源分岔/
+          # 擴充屬性，避免 CI 產出的 zip 在別人電腦上解壓縮後 App 損毀。
+          ditto -c -k --sequesterRsrc --keepParent package ChineseNameTaggerMac.zip
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChineseNameTaggerMac
+          path: desktop_tagger/mac/ChineseNameTaggerMac.zip
+          retention-days: 30
+
+      # 推 mac-v* 的 tag 才會建 Release（一般 push 到 main 只驗證打包
+      # 有沒有成功，用上面的 artifact 就好，不會每次 commit 都開一個
+      # 新版本給大家看到）。說明文字放在 RELEASE_NOTES.md（版本控制、
+      # 好維護），不在 workflow 裡塞多行字串。這個 zip 沒有 Apple
+      # Developer 簽章/公證，下載後第一次開會被 Gatekeeper 擋，說明裡
+      # 有寫怎麼繞過去。
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/mac-v')
+        working-directory: desktop_tagger/mac
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            ChineseNameTaggerMac.zip \
+            --title "中文人名標示 for Mac ${{ github.ref_name }}" \
+            --notes-file RELEASE_NOTES.md
+        env:
+          GH_TOKEN: ${{ github.token }}
