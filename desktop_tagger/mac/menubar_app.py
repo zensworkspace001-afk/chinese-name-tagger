@@ -56,6 +56,31 @@ import urllib.request
 
 import rumps
 from pynput import keyboard
+import pynput.keyboard._darwin as _pynput_darwin
+
+# 實測抓到的真實當機（~/Library/Logs/DiagnosticReports 裡好幾份
+# ChineseNameTagger-*.ips，同一組 call stack 出現超過一半）：pynput 在
+# macOS 上收到 NSSystemDefined 事件（媒體鍵、系統定義按鍵之類）時，會在
+# 它自己開的背景執行緒（不是主執行緒）呼叫 NSEvent.eventWithCGEvent_()
+# 把 CGEvent 轉成 NSEvent；這支 ObjC method 在某些較新的 macOS 版本上，
+# 內部會去查 Caps Lock/目前輸入法來源狀態，中間有一個
+# dispatch_assert_queue 的判斷式——不是從預期的 thread/queue 呼叫就直接
+# 讓整個 process 收到 SIGTRAP 死掉（是 C 層級的 trap，不是 Python
+# exception，try/except 完全攔不到）。LaunchAgent 的 KeepAlive 設定會在
+# crash 後自動重開，使用者實際感受到的就是選單列圖示一直起不來/閃現
+# 又消失。我們的快捷鍵功能完全用不到媒體鍵事件，所以直接把這個分支
+# patch 掉、跳過那個會炸的呼叫，其餘按鍵事件（真正的按下/放開、Caps
+# Lock 本身）維持 pynput 原本邏輯不變，行為不受影響。
+_original_pynput_handle_message = _pynput_darwin.Listener._handle_message
+
+
+def _safe_pynput_handle_message(self, _proxy, event_type, event, _refcon, injected):
+    if event_type == _pynput_darwin.NSSystemDefined:
+        return
+    return _original_pynput_handle_message(self, _proxy, event_type, event, _refcon, injected)
+
+
+_pynput_darwin.Listener._handle_message = _safe_pynput_handle_message
 
 from Foundation import NSObject, NSURL, NSURLRequest, NSMakeRect, NSUserDefaults
 from AppKit import (
