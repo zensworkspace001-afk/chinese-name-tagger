@@ -89,6 +89,20 @@ def _version_marker_path(model_dir):
     return os.path.join(model_dir, ".version")
 
 
+def delete_model(name, cache_dir):
+    """刪除已下載的模型快取，釋放磁碟空間。這不是不可逆的資料遺失——
+    刪掉的只是從 GitHub Release 下載下來的快取，manifest 裡的下載連結
+    還在，之後要用隨時可以重新下載，跟刪除使用者自己的文件不是同一個
+    風險等級，呼叫端（server.py 的 /delete_model）不需要額外的復原
+    機制，只要擋掉「刪掉目前正在使用的模型」這個會讓 App 當下失去可用
+    模型的情況即可。"""
+    if not _SAFE_MODEL_NAME_RE.match(name):
+        raise ValueError(f"模型名稱格式不合法：{name!r}")
+    model_dir = os.path.join(cache_dir, name)
+    if os.path.isdir(model_dir):
+        shutil.rmtree(model_dir)
+
+
 def get_local_version(model_dir):
     path = _version_marker_path(model_dir)
     if not os.path.isfile(path):

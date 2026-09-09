@@ -279,6 +279,32 @@ def api_download_model_async():
     return jsonify({"ok": True, "downloading": True, "already_running": not started})
 
 
+@app.route("/delete_model", methods=["POST"])
+def api_delete_model():
+    """刪除已下載的模型，釋放磁碟空間。擋掉刪除「目前使用中」的模型——
+    刪掉那個會讓 /tag 立刻失去可用模型，而且使用者當下不會意識到是
+    這個原因，寧可讓使用者先切換到別的已下載模型再刪。"""
+    data = request.get_json(force=True) or {}
+    name = data.get("model")
+    if not name:
+        return jsonify({"error": "沒有指定 model"}), 400
+
+    if _menubar_bridge is not None and _menubar_bridge.settings.get("model") == name:
+        return jsonify({"error": "這是目前使用中的模型，請先在「預設模型」切換成其他已下載的模型，再回來刪除這個"}), 400
+
+    try:
+        model_downloader.delete_model(name, model_downloader.get_cache_dir())
+    except Exception as e:
+        print(f"[/delete_model] failed: {e!r}", flush=True)
+        return jsonify({"error": str(e)}), 500
+
+    _model_cache.pop(name, None)
+    _download_progress.pop(name, None)
+    if _menubar_bridge is not None:
+        _menubar_bridge.on_model_deleted(name)
+    return jsonify({"ok": True})
+
+
 @app.route("/download_progress")
 def api_download_progress():
     name = request.args.get("model", "")

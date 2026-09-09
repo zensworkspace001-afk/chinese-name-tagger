@@ -223,6 +223,18 @@ INDEX_HTML = """<!doctype html>
     height: 100%; width: 0%; background: var(--accent); border-radius: 999px;
     transition: width .2s ease;
   }
+  .downloaded-models-list { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+  .downloaded-model-chip {
+    display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text);
+    background: var(--card-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 5px 6px 5px 10px;
+  }
+  .downloaded-model-chip button {
+    font-family: inherit; font-size: 12px; line-height: 1; cursor: pointer;
+    background: transparent; color: var(--muted); border: none; border-radius: 5px;
+    padding: 4px 6px; transition: background .12s, color .12s;
+  }
+  .downloaded-model-chip button:hover { background: var(--danger-bg); color: var(--danger); }
   .settings-row select {
     width: auto; min-width: 160px; font-size: 12.5px; padding: 7px 10px;
   }
@@ -425,6 +437,13 @@ INDEX_HTML = """<!doctype html>
       <div class="download-progress-label" id="download-progress-label"></div>
       <div class="download-progress-track"><div class="download-progress-fill" id="download-progress-fill"></div></div>
     </div>
+    <div class="settings-row" id="downloaded-models-row" hidden style="align-items:flex-start;">
+      <div>
+        <div class="settings-label">已下載的模型</div>
+        <div class="settings-hint">釋放磁碟空間用，之後需要可以再重新下載（使用中的模型不能刪）</div>
+      </div>
+      <div class="downloaded-models-list" id="downloaded-models-list"></div>
+    </div>
     <div class="settings-row">
       <div class="settings-label">快捷鍵</div>
       <select id="settings-hotkey"></select>
@@ -515,6 +534,8 @@ const settingsModelSelect = document.getElementById('settings-model');
 const downloadProgressRow = document.getElementById('download-progress-row');
 const downloadProgressLabel = document.getElementById('download-progress-label');
 const downloadProgressFill = document.getElementById('download-progress-fill');
+const downloadedModelsRow = document.getElementById('downloaded-models-row');
+const downloadedModelsList = document.getElementById('downloaded-models-list');
 const settingsHotkeySelect = document.getElementById('settings-hotkey');
 const settingsAutostartToggle = document.getElementById('settings-autostart');
 const licenseGate = document.getElementById('license-gate');
@@ -739,6 +760,7 @@ async function loadSettings() {
       if (m.name === data.model) opt.selected = true;
       settingsModelSelect.appendChild(opt);
     });
+    renderDownloadedModelsList(data.models || [], data.model);
 
     settingsHotkeySelect.innerHTML = '';
     (data.hotkeyOptions || []).forEach(([label, combo]) => {
@@ -753,6 +775,48 @@ async function loadSettings() {
     settingsAutostartToggle.setAttribute('aria-checked', data.autostart ? 'true' : 'false');
   } catch (e) {
     showBanner('設定讀取失敗：' + e);
+  }
+}
+
+// 只列出「已下載、而且不是使用中」的模型可以刪——使用中的那個刪了會讓
+// /tag 立刻沒有可用模型，跟原生選單「刪除已下載模型」子選單的限制
+// 一致（見 menubar_app.py::_refresh_delete_menu()）。一個都沒有的話
+// 整列隱藏起來，不要空著一個沒東西的區塊。
+function renderDownloadedModelsList(models, currentModel) {
+  const deletable = models.filter(m => m.downloaded && m.name !== currentModel);
+  downloadedModelsList.innerHTML = '';
+  downloadedModelsRow.hidden = deletable.length === 0;
+  deletable.forEach(m => {
+    const chip = document.createElement('div');
+    chip.className = 'downloaded-model-chip';
+    const label = document.createElement('span');
+    label.textContent = m.label;
+    const delBtn = document.createElement('button');
+    delBtn.textContent = '刪除';
+    delBtn.title = `刪除 ${m.label}（可以重新下載）`;
+    delBtn.addEventListener('click', () => deleteModel(m.name, m.label));
+    chip.appendChild(label);
+    chip.appendChild(delBtn);
+    downloadedModelsList.appendChild(chip);
+  });
+}
+
+async function deleteModel(name, label) {
+  try {
+    const res = await fetch('/delete_model', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: name }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      showBanner('刪除失敗：' + data.error);
+    } else {
+      showBanner(`已刪除模型「${label}」，之後需要可以再重新下載。`);
+    }
+  } catch (e) {
+    showBanner('刪除失敗：' + e);
+  } finally {
+    loadSettings();
   }
 }
 

@@ -840,6 +840,11 @@ class TaggerMenuBarApp(rumps.App):
         self.model_menu = rumps.MenuItem("模型版本")
         self.model_items = {}
 
+        # 「刪除已下載模型」子選單：動態列出目前已下載、且不是使用中的
+        # 模型（使用中的那個不給刪，見 _refresh_delete_menu()），每次
+        # 下載/刪除完成都會重建一次內容。
+        self.delete_menu = rumps.MenuItem("刪除已下載模型")
+
         self.hotkey_menu = rumps.MenuItem("快捷鍵")
         self.hotkey_items = {}
         for label, combo in HOTKEY_OPTIONS:
@@ -855,6 +860,7 @@ class TaggerMenuBarApp(rumps.App):
 
         settings_menu = rumps.MenuItem("設定")
         settings_menu.add(self.model_menu)
+        settings_menu.add(self.delete_menu)
         settings_menu.add(self.hotkey_menu)
         settings_menu.add(self.autostart_item)
         settings_menu.add(
@@ -967,6 +973,7 @@ class TaggerMenuBarApp(rumps.App):
             item.state = 1 if other_name == name else 0
         self.settings["model"] = name
         save_settings(self.settings)
+        self._refresh_delete_menu()
         return {"ok": True}
 
     def on_download_complete(self, name, success, error=None):
@@ -993,6 +1000,83 @@ class TaggerMenuBarApp(rumps.App):
         self.settings["model"] = name
         save_settings(self.settings)
         rumps.notification("中文人名標示", "", f"模型 {entry['label']} 下載完成")
+        self._refresh_delete_menu()
+
+    def on_model_deleted(self, name):
+        """backend_server 的 /delete_model 端點刪除成功時呼叫回來（網頁
+        設定面板觸發刪除會走這條路；原生選單觸發刪除走 _delete_model()，
+        兩邊最後都會呼叫這裡或做等價的狀態更新，確保不管從哪個介面刪的，
+        另一個介面看到的狀態都是一致的）。"""
+        entry = self._catalog_by_name.get(name)
+        if entry is None:
+            return
+        entry["downloaded"] = False
+        item = self.model_items.get(name)
+        if item:
+            item.title = self._model_item_label(entry)
+        self._refresh_delete_menu()
+
+    def _refresh_delete_menu(self):
+        """重建「刪除已下載模型」子選單的內容：只列出目前已下載、而且
+        不是使用中的模型（使用中的那個不給刪——跟 /delete_model 端點的
+        限制一致，這裡在 UI 層再擋一次，避免選單列出一個點了也會被
+        伺服器拒絕的選項，使用者體驗上比較乾淨）。
+
+        注意：rumps.MenuItem.clear() 直接呼叫底層 NSMenu 的
+        removeAllItems()，但這個底層 NSMenu 要等第一次呼叫 .add() 才會
+        被建立（lazy init，見 rumps 原始碼 MenuItem.__setitem__）。
+        self.delete_menu 一開始是空的、從沒 add 過任何項目，第一次呼叫
+        _refresh_delete_menu() 時如果直接呼叫 .clear()，底層 NSMenu
+        還是 None，會直接丟 AttributeError 把整個呼叫端（包含 Flask
+        的 /delete_model request handler）搞掛掉。用 len() 判斷有沒有
+        東西可清，避免在從沒 add 過的狀態下呼叫 clear()。"""
+        if len(self.delete_menu):
+            self.delete_menu.clear()
+        current = self.settings.get("model")
+        deletable = [
+            (name, entry) for name, entry in self._catalog_by_name.items()
+            if entry["downloaded"] and name != current
+        ]
+        if not deletable:
+            placeholder = rumps.MenuItem("（沒有可以刪除的模型）")
+            placeholder.set_callback(None)
+            self.delete_menu.add(placeholder)
+            return
+        for name, entry in deletable:
+            item = rumps.MenuItem(entry["label"], callback=self._make_delete_callback(name))
+            self.delete_menu.add(item)
+
+    def _make_delete_callback(self, name):
+        def callback(_):
+            threading.Thread(target=self._delete_model, args=(name,), daemon=True).start()
+
+        return callback
+
+    def _delete_model(self, name):
+        entry = self._catalog_by_name.get(name)
+        if entry is None:
+            return
+        if not confirm_dialog(
+            f"確定要刪除已下載的模型「{entry['label']}」嗎？\n\n"
+            "之後如果需要用到，可以再重新下載。", yes_label="刪除", no_label="取消",
+        ):
+            return
+        try:
+            backend_server.model_downloader.delete_model(
+                name, backend_server.model_downloader.get_cache_dir()
+            )
+        except Exception as e:
+            print(f"[_delete_model] exception: {e!r}", flush=True)
+            show_dialog(f"刪除失敗：{e}")
+            return
+        backend_server._model_cache.pop(name, None)
+        backend_server._download_progress.pop(name, None)
+        entry["downloaded"] = False
+        item = self.model_items.get(name)
+        if item:
+            item.title = self._model_item_label(entry)
+        self._refresh_delete_menu()
+        rumps.notification("中文人名標示", "", f"已刪除模型 {entry['label']}")
 
     def select_hotkey(self, combo):
         if combo not in self.hotkey_items:
@@ -1057,6 +1141,8 @@ class TaggerMenuBarApp(rumps.App):
             item.state = 1 if name == self.settings["model"] else 0
             self.model_items[name] = item
             self.model_menu.add(item)
+
+        self._refresh_delete_menu()
 
         # 目前選到的模型如果還沒下載（例如第一次使用），主動在背景下載，
         # 不用等使用者按標記才發現要下載、還得先跳確認。沒授權碼就不主動
@@ -1156,6 +1242,7 @@ class TaggerMenuBarApp(rumps.App):
             item.state = 1 if other_name == name else 0
         self.settings["model"] = name
         save_settings(self.settings)
+        self._refresh_delete_menu()
 
     def _make_hotkey_callback(self, combo):
         def callback(_):
