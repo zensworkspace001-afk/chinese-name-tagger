@@ -31,11 +31,23 @@ a = Analysis(
         (os.path.join(BACKEND_DIR, "server.py"), "."),
         (os.path.join(BACKEND_DIR, "index_html.py"), "."),
         (os.path.join(BACKEND_DIR, "model_downloader.py"), "."),
+        (os.path.join(BACKEND_DIR, "license_check.py"), "."),
         (os.path.join(MAC_DIR, "status_ready_icon.png"), "."),
         (os.path.join(MAC_DIR, "status_starting_icon.png"), "."),
         (os.path.join(MAC_DIR, "status_error_icon.png"), "."),
     ],
-    hiddenimports=["transformers", "torch", "rumps", "Foundation", "AppKit", "objc", "WebKit"],
+    # cryptography 用來離線驗證授權碼（license_check.py）——它的核心是一個
+    # Rust 編譯的 binary extension（_rust.abi3.so），不是純 Python，
+    # PyInstaller 自帶對 cryptography 的 hook 通常抓得到，但保險起見這裡
+    # 明講一次；如果實際打包後開啟 App 出現 "No module named
+    # 'cryptography.hazmat.bindings._rust'" 之類的錯誤，改用
+    # `from PyInstaller.utils.hooks import collect_all` 把
+    # `collect_all("cryptography")` 的三個回傳值分別併進
+    # datas/binaries/hiddenimports。
+    hiddenimports=[
+        "transformers", "torch", "rumps", "Foundation", "AppKit", "objc", "WebKit",
+        "cryptography", "cryptography.hazmat.bindings._rust",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

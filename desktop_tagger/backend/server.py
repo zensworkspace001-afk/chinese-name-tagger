@@ -42,6 +42,7 @@ from predict_bert import (  # noqa: E402
     split_sentences_keep_punct,
 )
 import model_downloader  # noqa: E402
+import license_check  # noqa: E402
 from index_html import INDEX_HTML  # noqa: E402
 
 DEFAULT_MODEL = "model_bert_colab_v5"
@@ -52,6 +53,20 @@ _model_cache = {}
 _manifest_cache_path = os.path.normpath(
     os.path.join(model_downloader.get_cache_dir(), "..", "models_manifest_cache.json")
 )
+
+# menubar_app.py 的 TaggerMenuBarApp 實例——「模型版本／快捷鍵／開機自動
+# 啟動」這些設定的實際狀態（settings.json、全域快捷鍵監聽、NSMenuItem
+# 打勾狀態）都活在那支程式裡，這支 server.py 本身沒有也不該重複一份。
+# 頁面上設定齒輪區塊要讀寫這些設定時，靠這個 bridge 呼叫回去，而不是把
+# 設定邏輯搬進 Flask 這邊重寫一次。獨立執行 server.py（沒有選單列 App）
+# 時 bridge 是 None，/settings 系列端點會退回成唯讀/回報錯誤，不影響
+# /tag 等核心功能。
+_menubar_bridge = None
+
+
+def set_menubar_bridge(bridge):
+    global _menubar_bridge
+    _menubar_bridge = bridge
 
 
 def get_catalog():
@@ -154,6 +169,9 @@ def api_models():
 
 @app.route("/download_model", methods=["POST"])
 def api_download_model():
+    if _menubar_bridge is not None and not _menubar_bridge.is_licensed():
+        return jsonify({"error": "請先輸入授權碼才能下載模型", "license_required": True}), 402
+
     data = request.get_json(force=True) or {}
     name = data.get("model")
     if not name:
@@ -173,8 +191,70 @@ def api_download_model():
     return jsonify({"ok": True, "model": name})
 
 
+@app.route("/settings")
+def api_get_settings():
+    if _menubar_bridge is None:
+        return jsonify(
+            {"model": DEFAULT_MODEL, "models": get_catalog(), "hotkey": None,
+             "hotkeyOptions": [], "autostart": False}
+        )
+    return jsonify(_menubar_bridge.get_settings_payload())
+
+
+@app.route("/settings/model", methods=["POST"])
+def api_set_default_model():
+    if _menubar_bridge is None:
+        return jsonify({"error": "設定功能只能在選單列 App 裡使用"}), 503
+    data = request.get_json(force=True) or {}
+    name = data.get("model")
+    if not name:
+        return jsonify({"error": "沒有指定 model"}), 400
+    return jsonify(_menubar_bridge.select_default_model(name, confirmed=bool(data.get("confirmed"))))
+
+
+@app.route("/settings/hotkey", methods=["POST"])
+def api_set_hotkey():
+    if _menubar_bridge is None:
+        return jsonify({"error": "設定功能只能在選單列 App 裡使用"}), 503
+    data = request.get_json(force=True) or {}
+    combo = data.get("hotkey")
+    if not combo:
+        return jsonify({"error": "沒有指定 hotkey"}), 400
+    return jsonify(_menubar_bridge.select_hotkey(combo))
+
+
+@app.route("/settings/autostart", methods=["POST"])
+def api_set_autostart():
+    if _menubar_bridge is None:
+        return jsonify({"error": "設定功能只能在選單列 App 裡使用"}), 503
+    data = request.get_json(force=True) or {}
+    return jsonify(_menubar_bridge.set_autostart(bool(data.get("enabled"))))
+
+
+@app.route("/license")
+def api_get_license_status():
+    if _menubar_bridge is None:
+        # 沒有選單列 App（直接跑這支 server.py 開發測試）時不擋——生產環境
+        # 一律經過 menubar_app.py，bridge 一定會被設好，這裡放行純粹是
+        # 為了開發方便，不影響實際上架後的行為。
+        return jsonify({"licensed": True, "standalone": True})
+    return jsonify({"licensed": _menubar_bridge.is_licensed()})
+
+
+@app.route("/license/activate", methods=["POST"])
+def api_activate_license():
+    if _menubar_bridge is None:
+        return jsonify({"error": "授權功能只能在選單列 App 裡使用"}), 503
+    data = request.get_json(force=True) or {}
+    key = data.get("key") or ""
+    return jsonify(_menubar_bridge.activate_license(key))
+
+
 @app.route("/tag", methods=["POST"])
 def api_tag():
+    if _menubar_bridge is not None and not _menubar_bridge.is_licensed():
+        return jsonify({"error": "請先輸入授權碼才能使用標記功能", "license_required": True}), 402
+
     data = request.get_json(force=True) or {}
     text = (data.get("text") or "").strip()
     model_name = data.get("model") or DEFAULT_MODEL
@@ -218,15 +298,22 @@ def api_tag():
     results = predict_document(sentences, model, tokenizer, rounds=rounds)
 
     names, seen = [], set()
-    for _, _, sent_names in results:
-        for sur, giv in sent_names:
-            if not (sur and giv):
-                continue
-            key = sur + giv
-            if key in seen:
-                continue
-            seen.add(key)
-            names.append([sur, giv])
+    for _, _, sent_entities in results:
+        for ent in sent_entities:
+            if ent["type"] == "CN":
+                if not (ent["sur"] and ent["giv"]):
+                    continue
+                key = "CN:" + ent["text"]
+                if key in seen:
+                    continue
+                seen.add(key)
+                names.append({"type": "CN", "sur": ent["sur"], "giv": ent["giv"], "text": ent["text"]})
+            else:
+                key = f"{ent['type']}:{ent['text']}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                names.append({"type": ent["type"], "text": ent["text"]})
 
     print(f"[/tag] result names: {names}", flush=True)
 

@@ -152,7 +152,7 @@ INDEX_HTML = """<!doctype html>
     color-scheme: light;
     --bg: #fcfcfb; --card: #ffffff; --card-2: #f7f6f3; --border: #e4e2dc;
     --text: #0b0b0b; --muted: #6b6a63; --muted-2: #918f86;
-    --sur: #2a78d6; --giv: #eb6834; --accent: #2a78d6;
+    --sur: #2a78d6; --giv: #eb6834; --for: #2e9e5b; --jpn: #8b5cf6; --accent: #2a78d6;
     --danger: #d64545; --danger-bg: #fdeceb;
     --shadow: 0 1px 2px rgba(20,18,14,0.04), 0 8px 24px -12px rgba(20,18,14,0.12);
     --shadow-lg: 0 4px 8px rgba(20,18,14,0.05), 0 20px 40px -16px rgba(20,18,14,0.18);
@@ -161,7 +161,7 @@ INDEX_HTML = """<!doctype html>
     :root { color-scheme: dark;
       --bg: #161614; --card: #201f1c; --card-2: #262521; --border: #35342f;
       --text: #f2f1ec; --muted: #9c9a90; --muted-2: #6f6d64;
-      --sur: #63a6ef; --giv: #ff9a68; --accent: #63a6ef;
+      --sur: #63a6ef; --giv: #ff9a68; --for: #4ade80; --jpn: #a78bfa; --accent: #63a6ef;
       --danger: #ff6b6b; --danger-bg: #3a1f1f;
       --shadow: 0 1px 2px rgba(0,0,0,0.2), 0 8px 24px -12px rgba(0,0,0,0.5);
       --shadow-lg: 0 4px 8px rgba(0,0,0,0.25), 0 20px 40px -16px rgba(0,0,0,0.6);
@@ -189,6 +189,46 @@ INDEX_HTML = """<!doctype html>
   .topbar .dot.on { background: #35c268; }
   .topbar .app-icon { width: 20px; height: 20px; border-radius: 6px; display: block; }
   .topbar .status-text { font-size: 11px; color: var(--muted-2); }
+  .topbar .icon-btn {
+    margin-left: auto; width: 26px; height: 26px; border-radius: 8px; padding: 0;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    background: transparent; color: var(--muted); border: none; font-size: 15px;
+    line-height: 1; transition: background .15s, color .15s;
+  }
+  .topbar .icon-btn:hover { background: var(--card-2); color: var(--text); }
+  .topbar .icon-btn.active { background: var(--card-2); color: var(--accent); }
+
+  /* 設定面板：貼著 topbar 下緣，點齒輪展開/收合——跟大視窗共用同一份
+     頁面/JS，選單列圖示彈出的小面板跟置中大視窗都是同一個網址，設定
+     邏輯只寫一次，兩邊行為自動保持一致。 */
+  .settings-panel {
+    max-height: 0; opacity: 0; overflow: hidden; background: var(--card-2);
+    border-bottom: 1px solid var(--border);
+    transition: max-height .25s ease, opacity .2s ease;
+  }
+  .settings-panel.show { max-height: 320px; opacity: 1; }
+  .settings-panel .inner {
+    max-width: 720px; margin: 0 auto; padding: 16px 28px 20px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .settings-row .settings-label { font-size: 13px; color: var(--text); }
+  .settings-row .settings-hint { font-size: 11.5px; color: var(--muted-2); margin-top: 2px; }
+  .settings-row select {
+    width: auto; min-width: 160px; font-size: 12.5px; padding: 7px 10px;
+  }
+  .settings-toggle {
+    position: relative; width: 36px; height: 21px; border-radius: 999px;
+    background: var(--border); border: none; cursor: pointer; flex-shrink: 0;
+    transition: background .15s;
+  }
+  .settings-toggle::after {
+    content: ''; position: absolute; top: 2px; left: 2px; width: 17px; height: 17px;
+    border-radius: 50%; background: white; transition: transform .15s;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+  }
+  .settings-toggle.on { background: var(--accent); }
+  .settings-toggle.on::after { transform: translateX(15px); }
 
   .wrap { max-width: 720px; margin: 0 auto; padding: 26px 28px 60px; }
 
@@ -277,6 +317,8 @@ INDEX_HTML = """<!doctype html>
   .name-mark { padding: 1px 2px; border-radius: 4px; position: relative; }
   .sur { background: color-mix(in srgb, var(--sur) 22%, transparent); border-bottom: 2px solid var(--sur); }
   .giv { background: color-mix(in srgb, var(--giv) 22%, transparent); border-bottom: 2px solid var(--giv); }
+  .for { background: color-mix(in srgb, var(--for) 22%, transparent); border-bottom: 2px solid var(--for); }
+  .jpn { background: color-mix(in srgb, var(--jpn) 22%, transparent); border-bottom: 2px solid var(--jpn); }
   .name-occurrence { cursor: pointer; border-radius: 4px; transition: background .12s; }
   .name-occurrence:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 
@@ -304,14 +346,81 @@ INDEX_HTML = """<!doctype html>
   }
   .banner.show { opacity: 1; max-height: 80px; margin-bottom: 16px; }
   .footer-hint { text-align: center; font-size: 11.5px; color: var(--muted-2); margin-top: 6px; }
+
+  /* 授權碼鎖：蓋住整個頁面，沒有輸入有效授權碼之前完全看不到/用不到下面
+     的標記人名功能——蓋住的是畫面，真正擋下功能的是 /tag 那支 API 本身
+     （見 server.py），這裡只是讓使用者清楚知道現在為什麼不能用。 */
+  .license-gate {
+    position: fixed; inset: 0; z-index: 999; background: var(--bg);
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+  }
+  .license-gate[hidden] { display: none; }
+  .license-card {
+    width: 100%; max-width: 360px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; box-shadow: var(--shadow-lg); padding: 26px 24px 24px; text-align: center;
+  }
+  .license-card img { width: 40px; height: 40px; border-radius: 10px; margin-bottom: 12px; }
+  .license-card h2 { font-size: 15px; margin: 0 0 4px; }
+  .license-card p { font-size: 12.5px; color: var(--muted); margin: 0 0 18px; line-height: 1.6; }
+  .license-card input {
+    width: 100%; font-family: inherit; font-size: 13px; color: var(--text);
+    background: var(--card-2); border: 1px solid var(--border); border-radius: 9px;
+    padding: 10px 12px; text-align: center; letter-spacing: 0.02em; outline: none;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .license-card input:focus {
+    border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  .license-card button {
+    width: 100%; margin-top: 12px; font-family: inherit; font-size: 13.5px; font-weight: 600;
+    cursor: pointer; background: var(--accent); color: white; border: none; border-radius: 9px;
+    padding: 10px 20px; transition: transform .12s, filter .12s, opacity .12s;
+  }
+  .license-card button:hover:not(:disabled) { filter: brightness(1.06); }
+  .license-card button:active:not(:disabled) { transform: scale(0.97); }
+  .license-card button:disabled { opacity: 0.55; cursor: default; }
+  .license-error {
+    font-size: 12px; color: var(--danger); margin-top: 10px; min-height: 14px;
+  }
 </style>
 </head>
 <body>
+<div class="license-gate" id="license-gate">
+  <div class="license-card">
+    <img src="data:image/png;base64,__APP_ICON_B64__" alt="">
+    <h2>需要授權碼</h2>
+    <p>這是付費軟體，請輸入購買時收到的授權碼才能使用標記人名功能。</p>
+    <input type="text" id="license-input" placeholder="CNT1-XXXXX-XXXXX-…" autocomplete="off" spellcheck="false">
+    <button id="license-activate-btn">啟用</button>
+    <div class="license-error" id="license-error"></div>
+  </div>
+</div>
 <div class="topbar">
   <span class="dot" id="status-dot"></span>
   <img class="app-icon" src="data:image/png;base64,__APP_ICON_B64__" alt="">
   <h1>中文人名標示</h1>
   <span class="status-text" id="status-text">連線中…</span>
+  <button class="icon-btn" id="settings-btn" title="設定" aria-label="設定">⚙</button>
+</div>
+
+<div class="settings-panel" id="settings-panel">
+  <div class="inner">
+    <div class="settings-row">
+      <div>
+        <div class="settings-label">預設模型</div>
+        <div class="settings-hint">快捷鍵標記剪貼簿內容時使用</div>
+      </div>
+      <select id="settings-model"></select>
+    </div>
+    <div class="settings-row">
+      <div class="settings-label">快捷鍵</div>
+      <select id="settings-hotkey"></select>
+    </div>
+    <div class="settings-row">
+      <div class="settings-label">開機自動啟動</div>
+      <button class="settings-toggle" id="settings-autostart" role="switch" aria-checked="false"></button>
+    </div>
+  </div>
 </div>
 
 <div class="wrap">
@@ -343,6 +452,8 @@ INDEX_HTML = """<!doctype html>
         <div class="legend">
           <span><span class="lgdot" style="background:var(--sur)"></span>姓</span>
           <span><span class="lgdot" style="background:var(--giv)"></span>名</span>
+          <span><span class="lgdot" style="background:var(--for)"></span>外語音譯</span>
+          <span><span class="lgdot" style="background:var(--jpn)"></span>日文人名</span>
         </div>
         <div class="mask-config">
           <label title="開頭保留幾個字不打碼">頭留
@@ -385,6 +496,54 @@ const statusText = document.getElementById('status-text');
 const headRevealInput = document.getElementById('head-reveal');
 const tailRevealInput = document.getElementById('tail-reveal');
 const maskSymbolInput = document.getElementById('mask-symbol');
+const settingsBtn = document.getElementById('settings-btn');
+const settingsPanel = document.getElementById('settings-panel');
+const settingsModelSelect = document.getElementById('settings-model');
+const settingsHotkeySelect = document.getElementById('settings-hotkey');
+const settingsAutostartToggle = document.getElementById('settings-autostart');
+const licenseGate = document.getElementById('license-gate');
+const licenseInput = document.getElementById('license-input');
+const licenseActivateBtn = document.getElementById('license-activate-btn');
+const licenseError = document.getElementById('license-error');
+
+async function checkLicense() {
+  try {
+    const res = await fetch('/license');
+    const data = await res.json();
+    licenseGate.hidden = !!data.licensed;
+  } catch (e) {
+    // 連線失敗（server 可能還在啟動中）先假設鎖住，等 loadStatus() 那邊
+    // 的重試機制連上之後，使用者重新整理或再點一次圖示就會重新檢查。
+    licenseGate.hidden = false;
+  }
+}
+
+licenseActivateBtn.addEventListener('click', async () => {
+  const key = licenseInput.value.trim();
+  if (!key) { licenseError.textContent = '請輸入授權碼。'; return; }
+  licenseActivateBtn.disabled = true;
+  licenseError.textContent = '';
+  try {
+    const res = await fetch('/license/activate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      licenseGate.hidden = true;
+      loadStatus();
+    } else {
+      licenseError.textContent = data.error || '授權碼無效。';
+    }
+  } catch (e) {
+    licenseError.textContent = '連線失敗：' + e;
+  } finally {
+    licenseActivateBtn.disabled = false;
+  }
+});
+licenseInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') licenseActivateBtn.click();
+});
 
 let bannerTimer = null;
 function showBanner(message) {
@@ -472,8 +631,11 @@ function applyMask(sur, giv) {
 }
 
 // 把 predict_bert 逐字元輸出的 tagged 陣列，重新分組成「一般文字」跟
-// 「完整一個人名（姓+名合在一起）」兩種區塊——標色/打碼都要以「一個
-// 完整人名」為單位處理，不能逐字元各自獨立判斷。
+// 「完整一個實體」兩種區塊——標色/打碼都要以「一個完整實體」為單位
+// 處理，不能逐字元各自獨立判斷。中文人名（entType 'CN'）姓/名分開存、
+// 各自標不同顏色；外語音譯（'FOR'）/日文人名（'JPN'）整段是一個實體，
+// 不切邊界，sur 固定是空字串、giv 存整段文字（沿用同一個 sur+giv 組合
+// 的打碼機制，applyMask('', text) 一樣能正確運作，不用另外重寫打碼邏輯）。
 function groupNameRuns(tagged) {
   const runs = [];
   let i = 0;
@@ -492,13 +654,30 @@ function groupNameRuns(tagged) {
         giv += tagged[i][0];
         i++;
       }
-      runs.push({ type: 'name', chars, sur, giv });
+      runs.push({ type: 'name', entType: 'CN', chars, sur, giv, text: sur + giv });
+    } else if (tag === 'B-FOR' || tag === 'B-JPN') {
+      const entType = tag.slice(2); // 'FOR' 或 'JPN'
+      const cls = entType.toLowerCase();
+      const chars = [];
+      let text = '';
+      while (i < tagged.length && (tagged[i][1] === `B-${entType}` || tagged[i][1] === `I-${entType}`)) {
+        chars.push({ ch: tagged[i][0], cls });
+        text += tagged[i][0];
+        i++;
+      }
+      runs.push({ type: 'name', entType, chars, sur: '', giv: text, text });
     } else {
       runs.push({ type: 'char', ch: tagged[i][0] });
       i++;
     }
   }
   return runs;
+}
+
+// CN 用「姓+名」全文當 key，FOR/JPN 加類型前綴避免跟同名的 CN 撞 key
+// （例如巧合下有中文名跟音譯人名文字剛好一樣的極端情況）。
+function entKey(entType, text) {
+  return entType === 'CN' ? text : `${entType}:${text}`;
 }
 
 function toggleMask(key) {
@@ -531,19 +710,110 @@ async function loadStatus() {
   }
 }
 
+async function loadSettings() {
+  try {
+    const res = await fetch('/settings');
+    const data = await res.json();
+
+    settingsModelSelect.innerHTML = '';
+    (data.models || []).forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.name;
+      opt.textContent = m.downloaded ? m.label : `${m.label}（未下載）`;
+      if (m.name === data.model) opt.selected = true;
+      settingsModelSelect.appendChild(opt);
+    });
+
+    settingsHotkeySelect.innerHTML = '';
+    (data.hotkeyOptions || []).forEach(([label, combo]) => {
+      const opt = document.createElement('option');
+      opt.value = combo;
+      opt.textContent = label;
+      if (combo === data.hotkey) opt.selected = true;
+      settingsHotkeySelect.appendChild(opt);
+    });
+
+    settingsAutostartToggle.classList.toggle('on', !!data.autostart);
+    settingsAutostartToggle.setAttribute('aria-checked', data.autostart ? 'true' : 'false');
+  } catch (e) {
+    showBanner('設定讀取失敗：' + e);
+  }
+}
+
+settingsBtn.addEventListener('click', () => {
+  const show = !settingsPanel.classList.contains('show');
+  settingsPanel.classList.toggle('show', show);
+  settingsBtn.classList.toggle('active', show);
+  if (show) loadSettings();
+});
+
+settingsModelSelect.addEventListener('change', async () => {
+  const name = settingsModelSelect.value;
+  try {
+    let res = await fetch('/settings/model', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: name }),
+    });
+    let data = await res.json();
+    if (data.needs_confirm) {
+      const size = data.size_bytes ? `（約 ${(data.size_bytes / 1e6).toFixed(0)}MB）` : '';
+      showBanner(`模型「${data.label}」尚未下載${size}，正在下載…`);
+      res = await fetch('/settings/model', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: name, confirmed: true }),
+      });
+      data = await res.json();
+    }
+    if (data.error) { showBanner('模型切換失敗：' + data.error); }
+  } catch (e) {
+    showBanner('模型切換失敗：' + e);
+  } finally {
+    loadSettings();
+  }
+});
+
+settingsHotkeySelect.addEventListener('change', async () => {
+  try {
+    const res = await fetch('/settings/hotkey', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hotkey: settingsHotkeySelect.value }),
+    });
+    const data = await res.json();
+    if (data.error) showBanner('快捷鍵設定失敗：' + data.error);
+  } catch (e) {
+    showBanner('快捷鍵設定失敗：' + e);
+  }
+});
+
+settingsAutostartToggle.addEventListener('click', async () => {
+  const enabled = !settingsAutostartToggle.classList.contains('on');
+  try {
+    const res = await fetch('/settings/autostart', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await res.json();
+    if (data.error) { showBanner('開機自動啟動設定失敗：' + data.error); return; }
+    settingsAutostartToggle.classList.toggle('on', !!data.autostart);
+    settingsAutostartToggle.setAttribute('aria-checked', data.autostart ? 'true' : 'false');
+  } catch (e) {
+    showBanner('開機自動啟動設定失敗：' + e);
+  }
+});
+
 function renderResult(sentences) {
   sentences = sentences || [];
   lastSentences = sentences;
 
   let html = '';
-  const allNames = [];
+  const allEntities = [];
   for (const sent of sentences) {
     for (const run of groupNameRuns(sent.tagged)) {
       if (run.type === 'char') {
         html += escapeHtml(run.ch);
         continue;
       }
-      const key = run.sur + run.giv;
+      const key = entKey(run.entType, run.text);
       const masked = maskedNames.has(key);
       const { head, tailStart } = maskRange(run.chars.length);
       html += `<span class="name-occurrence" data-key="${escapeHtml(key)}" title="點一下打碼/取消打碼">`;
@@ -554,42 +824,53 @@ function renderResult(sentences) {
       });
       html += `</span>`;
     }
-    (sent.names || []).forEach(n => allNames.push(n));
+    (sent.names || []).forEach(ent => allEntities.push(ent));
   }
   resultText.innerHTML = html;
   resultEmpty.style.display = html ? 'none' : 'block';
 
   nameList.innerHTML = '';
-  // 統計每個人名出現幾次（用「姓+名」當 key），依出現次數由多到少排序，
-  // 次數相同的維持原本第一次出現的先後順序。
+  // 統計每個實體出現幾次（CN 用「姓+名」、FOR/JPN 用「類型+全名」當 key），
+  // 依出現次數由多到少排序，次數相同的維持原本第一次出現的先後順序。
   const counts = new Map();
-  allNames.forEach(([sur, giv]) => {
-    const key = (sur || '') + (giv || '');
+  allEntities.forEach(ent => {
+    if (ent.type === 'CN' && !(ent.sur && ent.giv)) return; // 沒配對到名的殘缺姓/名不顯示，跟原本行為一致
+    const key = entKey(ent.type, ent.text);
     const entry = counts.get(key);
     if (entry) {
       entry.count += 1;
     } else {
-      counts.set(key, { sur, giv, count: 1 });
+      counts.set(key, { ...ent, count: 1 });
     }
   });
   const ranked = Array.from(counts.values()).sort((a, b) => b.count - a.count);
-  ranked.forEach(({ sur, giv, count }, i) => {
-    const key = (sur || '') + (giv || '');
+  ranked.forEach((item, i) => {
+    const key = entKey(item.type, item.text);
     const masked = maskedNames.has(key);
-    let surShown = sur || '？';
-    let givShown = giv || '？';
-    if (masked) {
-      const applied = applyMask(sur, giv);
-      surShown = applied.surShown || '？';
-      givShown = applied.givShown || '？';
-    }
     const chip = document.createElement('span');
     chip.className = 'name-chip';
     chip.dataset.key = key;
     chip.title = '點一下打碼/取消打碼';
     chip.style.animationDelay = `${Math.min(i, 12) * 35}ms`;
-    const countBadge = count > 1 ? `<span class="count">×${count}</span>` : '';
-    chip.innerHTML = `<b>${escapeHtml(surShown)}</b><i>${escapeHtml(givShown)}</i>${countBadge}`;
+    const countBadge = item.count > 1 ? `<span class="count">×${item.count}</span>` : '';
+    if (item.type === 'CN') {
+      let surShown = item.sur || '？';
+      let givShown = item.giv || '？';
+      if (masked) {
+        const applied = applyMask(item.sur, item.giv);
+        surShown = applied.surShown || '？';
+        givShown = applied.givShown || '？';
+      }
+      chip.innerHTML = `<b>${escapeHtml(surShown)}</b><i>${escapeHtml(givShown)}</i>${countBadge}`;
+    } else {
+      let textShown = item.text || '？';
+      if (masked) {
+        const applied = applyMask('', item.text);
+        textShown = applied.givShown || '？';
+      }
+      const typeColor = item.type === 'FOR' ? 'var(--for)' : 'var(--jpn)';
+      chip.innerHTML = `<span style="color:${typeColor};font-size:10px;font-weight:700;margin-right:4px;">${item.type}</span><b>${escapeHtml(textShown)}</b>${countBadge}`;
+    }
     nameList.appendChild(chip);
   });
 
@@ -691,6 +972,7 @@ loadMaskSettings();
 headRevealInput.value = headReveal;
 tailRevealInput.value = tailReveal;
 maskSymbolInput.value = maskSymbol;
+checkLicense();
 loadStatus();
 </script>
 </body>

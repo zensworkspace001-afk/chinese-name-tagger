@@ -97,6 +97,68 @@ def extract_names(tagged):
     return results
 
 
+def extract_entities(tagged):
+    """統一格式版本，同時處理中文人名（切姓/名）、外語音譯人名（B-FOR/
+    I-FOR，整段一個實體不切邊界）、日文人名（B-JPN/I-JPN，同樣整段一個
+    實體）。回傳 dict 清單：
+    - {"type": "CN", "sur": ..., "giv": ..., "text": sur+giv}
+    - {"type": "FOR", "text": ...}
+    - {"type": "JPN", "text": ...}
+    刻意不修改 extract_names()（只認 SUR/GIV，行為維持不變）——app.py
+    以外的呼叫端（colab notebook、streamlit_app 等）目前都是靠
+    extract_names() 的 (sur, giv) tuple 格式運作，改了會連帶要求它們
+    都跟著改，這裡新增一個函式取代，不動舊的。"""
+    results = []
+    sur, giv = "", ""
+    cn_state = None
+    buf, buf_type = "", None
+
+    def flush_cn():
+        nonlocal sur, giv, cn_state
+        if sur or giv:
+            results.append({"type": "CN", "sur": sur, "giv": giv, "text": sur + giv})
+        sur, giv, cn_state = "", "", None
+
+    def flush_buf():
+        nonlocal buf, buf_type
+        if buf:
+            results.append({"type": buf_type, "text": buf})
+        buf, buf_type = "", None
+
+    for ch, tag in tagged:
+        if tag == "B-SUR":
+            flush_buf()
+            flush_cn()
+            sur, giv = ch, ""
+            cn_state = "SUR"
+        elif tag == "I-SUR" and cn_state == "SUR":
+            sur += ch
+        elif tag == "B-GIV":
+            flush_buf()
+            giv = ch
+            cn_state = "GIV"
+        elif tag == "I-GIV" and cn_state == "GIV":
+            giv += ch
+        elif tag == "B-FOR":
+            flush_cn()
+            flush_buf()
+            buf, buf_type = ch, "FOR"
+        elif tag == "I-FOR" and buf_type == "FOR":
+            buf += ch
+        elif tag == "B-JPN":
+            flush_cn()
+            flush_buf()
+            buf, buf_type = ch, "JPN"
+        elif tag == "I-JPN" and buf_type == "JPN":
+            buf += ch
+        else:
+            flush_cn()
+            flush_buf()
+    flush_cn()
+    flush_buf()
+    return results
+
+
 def collect_confirmed_names(doc_tagged):
     """doc_tagged: 每句話的 (sentence, tagged) list。
     回傳這篇文章裡「姓+名都有」的完整人名字串集合。"""
@@ -106,6 +168,78 @@ def collect_confirmed_names(doc_tagged):
             if sur and giv:
                 confirmed.add(sur + giv)
     return confirmed
+
+
+def collect_confirmed_entities(doc_tagged):
+    """跟 collect_confirmed_names() 一樣的概念，但同時收集 CN/FOR/JPN
+    三種類型，回傳 {"CN": {...}, "FOR": {...}, "JPN": {...}} 三個集合。"""
+    confirmed = {"CN": set(), "FOR": set(), "JPN": set()}
+    for sentence, tagged in doc_tagged:
+        for ent in extract_entities(tagged):
+            if ent["type"] == "CN":
+                if ent["sur"] and ent["giv"]:
+                    confirmed["CN"].add(ent["text"])
+            else:
+                confirmed[ent["type"]].add(ent["text"])
+    return confirmed
+
+
+def global_diffusion_multi(doc_tagged, confirmed):
+    """global_diffusion() 的多類型版本：對每句話裡完全沒被標到（整段 O）、
+    但字串跟篇章內已確認實體一致的地方，召回標成對應類型。CN 沿用
+    match_surname() 切姓/名邊界；FOR/JPN 整段直接標同一個實體，不用切
+    邊界（跟 fetch_foreign_corpus.py／fetch_japanese_corpus.py 的標記
+    邏輯一致）。"""
+    all_confirmed = []
+    for name in confirmed.get("CN", ()):
+        all_confirmed.append((name, "CN"))
+    for name in confirmed.get("FOR", ()):
+        all_confirmed.append((name, "FOR"))
+    for name in confirmed.get("JPN", ()):
+        all_confirmed.append((name, "JPN"))
+    if not all_confirmed:
+        return doc_tagged
+    all_confirmed.sort(key=lambda x: len(x[0]), reverse=True)
+
+    new_doc = []
+    for sentence, tagged in doc_tagged:
+        chars = [c for c, _ in tagged]
+        tags = [t for _, t in tagged]
+        i, n = 0, len(chars)
+        while i < n:
+            if tags[i] == "O":
+                matched, matched_type = None, None
+                for name, etype in all_confirmed:
+                    if sentence.startswith(name, i):
+                        matched, matched_type = name, etype
+                        break
+                if matched:
+                    span_all_o = all(t == "O" for t in tags[i:i + len(matched)])
+                    if span_all_o:
+                        if matched_type == "CN":
+                            ms = match_surname(sentence, i)
+                            if ms and matched.startswith(ms[0]):
+                                sur, slen = ms
+                                giv = matched[slen:]
+                                if giv:
+                                    tags[i] = "B-SUR"
+                                    for k in range(1, slen):
+                                        tags[i + k] = "I-SUR"
+                                    goff = i + slen
+                                    tags[goff] = "B-GIV"
+                                    for k in range(1, len(giv)):
+                                        tags[goff + k] = "I-GIV"
+                                    i += len(matched)
+                                    continue
+                        else:  # FOR / JPN：整段一個實體，不切邊界
+                            tags[i] = f"B-{matched_type}"
+                            for k in range(1, len(matched)):
+                                tags[i + k] = f"I-{matched_type}"
+                            i += len(matched)
+                            continue
+            i += 1
+        new_doc.append((sentence, list(zip(chars, tags))))
+    return new_doc
 
 
 def global_diffusion(doc_tagged, confirmed_names):
@@ -214,14 +348,20 @@ def local_diffusion(doc_tagged, confirmed_names):
 
 def predict_document(sentences, model, tokenizer, rounds=1):
     """對一整篇文章（多句話）做逐句預測 + 篇章級全局/局部擴散後處理。
-    回傳 [(sentence, tagged, names), ...]。"""
+    回傳 [(sentence, tagged, entities), ...]，entities 是 extract_entities()
+    的統一格式（CN/FOR/JPN 都有）。
+
+    global diffusion（跨句召回同一個已確認實體）用 global_diffusion_multi()，
+    CN/FOR/JPN 三種都處理；local diffusion（修補「有姓無名」/「有名無姓」
+    的殘缺 CN 姓名）維持只處理 CN——FOR/JPN 是整段不切邊界的單一實體，
+    沒有「半個實體」這種殘缺狀態可以修補，套用 local diffusion 沒有意義。"""
     doc_tagged = [(s, predict(s, model, tokenizer)) for s in sentences]
     for _ in range(rounds):
-        confirmed = collect_confirmed_names(doc_tagged)
-        doc_tagged = global_diffusion(doc_tagged, confirmed)
-        confirmed = collect_confirmed_names(doc_tagged)
-        doc_tagged = local_diffusion(doc_tagged, confirmed)
-    return [(s, tagged, extract_names(tagged)) for s, tagged in doc_tagged]
+        confirmed = collect_confirmed_entities(doc_tagged)
+        doc_tagged = global_diffusion_multi(doc_tagged, confirmed)
+        confirmed_cn = collect_confirmed_entities(doc_tagged)["CN"]
+        doc_tagged = local_diffusion(doc_tagged, confirmed_cn)
+    return [(s, tagged, extract_entities(tagged)) for s, tagged in doc_tagged]
 
 
 if __name__ == "__main__":

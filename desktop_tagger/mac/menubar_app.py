@@ -82,19 +82,31 @@ def _safe_pynput_handle_message(self, _proxy, event_type, event, _refcon, inject
 
 _pynput_darwin.Listener._handle_message = _safe_pynput_handle_message
 
-from Foundation import NSObject, NSURL, NSURLRequest, NSMakeRect, NSUserDefaults
+from Foundation import NSObject, NSURL, NSURLRequest, NSMakeRect, NSMakePoint, NSUserDefaults
+from Quartz import CAMediaTimingFunction, kCAMediaTimingFunctionEaseIn, kCAMediaTimingFunctionEaseOut
 from AppKit import (
     NSApp,
+    NSAnimationContext,
     NSAppearance,
+    NSColor,
+    NSEventMaskLeftMouseUp,
+    NSEventMaskRightMouseUp,
+    NSEventModifierFlagControl,
+    NSEventTypeRightMouseUp,
     NSMenu,
     NSMenuItem,
+    NSScreen,
     NSWindow,
     NSApplicationActivationPolicyAccessory,
     NSApplicationActivationPolicyRegular,
     NSBackingStoreBuffered,
+    NSPopUpMenuWindowLevel,
+    NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSWindowCollectionBehaviorMoveToActiveSpace,
+    NSWindowCollectionBehaviorTransient,
     NSViewWidthSizable,
     NSViewHeightSizable,
+    NSWindowStyleMaskBorderless,
     NSWindowStyleMaskTitled,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskResizable,
@@ -102,6 +114,7 @@ from AppKit import (
 )
 from WebKit import WKWebView, WKWebViewConfiguration
 from PyObjCTools import AppHelper
+from rumps import events as rumps_events
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     BASE_DIR = sys._MEIPASS
@@ -111,6 +124,7 @@ else:
 sys.path.insert(0, BASE_DIR)
 
 import server as backend_server  # noqa: E402
+import license_check  # noqa: E402
 
 # launchd 啟動的 GUI App 沒有繼承使用者 shell 的 LANG/LC_ALL locale。
 # pbpaste/pbcopy 本身會依照 locale 把剪貼簿內容轉碼，locale 沒設好的話
@@ -166,7 +180,7 @@ def acquire_single_instance_lock():
 
 
 def load_settings():
-    defaults = {"model": backend_server.DEFAULT_MODEL, "hotkey": DEFAULT_HOTKEY}
+    defaults = {"model": backend_server.DEFAULT_MODEL, "hotkey": DEFAULT_HOTKEY, "license_key": ""}
     try:
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
             saved = json.load(f)
@@ -377,6 +391,34 @@ def names_to_message(data):
     return "、".join(parts)
 
 
+_foreground_policy_count = 0
+
+
+def _enter_foreground_policy():
+    """這支 App 平常是 accessory activation policy（LSUIElement=True，
+    沒有 Dock 圖示）。實測過：光靠 activateIgnoringOtherApps_(True) 在
+    accessory policy 下常常不會真的把視窗變成 key/最前面（尤其是從背景
+    執行緒的工作經 callAfter 觸發的情況），而且編輯選單的 Cmd+C/Cmd+V/
+    Cmd+A 這些快捷鍵在 accessory policy 下也不會確實派送到 WKWebView
+    裡的文字框。暫時切成 regular policy（顯示視窗/面板期間才會多一個
+    Dock 圖示）是這類「常駐選單列但偶爾需要真正視窗」App 常見的做法。
+
+    用計數器而不是直接切換，是因為現在有兩個地方（置中大視窗、選單列
+    圖示彈出的面板）都可能個別開著或同時開著——如果誰關掉就直接切回
+    accessory，另一個還開著的那個會跟著失去 Regular policy 才有的行為。
+    """
+    global _foreground_policy_count
+    _foreground_policy_count += 1
+    NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+
+
+def _exit_foreground_policy():
+    global _foreground_policy_count
+    _foreground_policy_count = max(0, _foreground_policy_count - 1)
+    if _foreground_policy_count == 0:
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
+
 class _ResultWebViewNavDelegate(NSObject):
     """WKNavigationDelegate：頁面（server.py 出的 /）載入完成時通知
     ResultWindowController，好知道現在能不能安全呼叫 evaluateJavaScript
@@ -397,6 +439,243 @@ class _ResultWindowDelegate(NSObject):
         if getattr(self, "owner", None) is not None:
             self.owner._on_window_hidden()
         return False
+
+
+POPOVER_WIDTH = 640
+POPOVER_HEIGHT = 420
+# 彈出動畫：從「貼著圖示下方、縮小到 94%」的狀態，同時放大到 100%＋淡入，
+# 感覺像從圖示那裡「長出來」——只用線性淡入淡出+位移看起來很機械，一定
+# 要搭配 ease 曲線＋縮放才會有原生 App 那種「彈」的質感。收起來的動畫
+# 刻意比彈出快一點（人對「東西消失」比「東西出現」更沒耐性等）。
+POPOVER_SHOW_DURATION = 0.22
+POPOVER_HIDE_DURATION = 0.16
+POPOVER_START_SCALE = 0.94
+
+
+class _PopoverPanel(NSWindow):
+    """無邊框視窗預設 canBecomeKeyWindow 回 False（AppKit 假設無邊框視窗
+    大多是提示框、不需要拿鍵盤焦點），面板裡的文字框會完全打不了字。
+    覆寫成 True 才能讓面板正常接收鍵盤輸入，同時仍維持沒有標題列/邊框的
+    外觀（跟原生選單/Claude 的彈出面板一樣）。"""
+
+    def canBecomeKeyWindow(self):
+        return True
+
+
+class _PopoverWebViewNavDelegate(NSObject):
+    def webView_didFinishNavigation_(self, webView, navigation):
+        if getattr(self, "owner", None) is not None:
+            self.owner._on_did_finish_navigation()
+
+
+class _PopoverWindowDelegate(NSObject):
+    """點面板外面（面板失去 key window 身份）就自動收起來，這是 popover
+    最基本的互動預期——跟原本置中大視窗不同，不需要使用者自己按關閉。"""
+
+    def windowDidResignKey_(self, notification):
+        if getattr(self, "owner", None) is not None:
+            self.owner._on_resign_key()
+
+
+class StatusPopoverController:
+    """左鍵點選單列圖示彈出的小面板：貼著圖示正下方彈出、點外面自動收起
+    來，外觀/互動模仿 Claude 桌面版選單列圖示的做法。跟 ResultWindowController
+    差別只在視窗本身的樣式跟顯示/隱藏邏輯——內容一樣是載入 server.py 出的
+    同一個頁面（含標記人名跟設定），兩邊功能永遠一致，不用維護兩份 UI。"""
+
+    def __init__(self, port):
+        self._port = port
+        self._window = None
+        self._webview = None
+
+    def _ensure_created(self):
+        if self._window is not None:
+            return
+        rect = NSMakeRect(0, 0, POPOVER_WIDTH, POPOVER_HEIGHT)
+        window = _PopoverPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            rect, NSWindowStyleMaskBorderless, NSBackingStoreBuffered, False
+        )
+        window.setReleasedWhenClosed_(False)
+        window.setOpaque_(False)
+        window.setHasShadow_(True)
+        window.setBackgroundColor_(NSColor.clearColor())
+        # NSPopUpMenuWindowLevel 讓面板浮在一般 App 視窗之上（包括全螢幕
+        # 視窗），跟選單本身的層級一致——選單列小工具彈出的東西理當跟選單
+        # 一樣「隨時蓋在最上面」，不會被使用者正在用的其他視窗擋住。
+        window.setLevel_(NSPopUpMenuWindowLevel)
+        window.setCollectionBehavior_(
+            NSWindowCollectionBehaviorCanJoinAllSpaces
+            | NSWindowCollectionBehaviorTransient
+        )
+
+        webview = WKWebView.alloc().initWithFrame_configuration_(
+            rect, WKWebViewConfiguration.alloc().init()
+        )
+        webview.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        # 圓角＋陰影：面板沒有原生視窗的標題列/邊框，這是唯一讓它看起來是
+        # 「浮出來的卡片」而不是螢幕上一塊突兀方形的手段。
+        webview.setWantsLayer_(True)
+        webview.layer().setCornerRadius_(12)
+        webview.layer().setMasksToBounds_(True)
+
+        nav_delegate = _PopoverWebViewNavDelegate.alloc().init()
+        nav_delegate.owner = self
+        webview.setNavigationDelegate_(nav_delegate)
+
+        win_delegate = _PopoverWindowDelegate.alloc().init()
+        win_delegate.owner = self
+        window.setDelegate_(win_delegate)
+        window.setContentView_(webview)
+
+        url = NSURL.URLWithString_(f"http://127.0.0.1:{self._port}/")
+        webview.loadRequest_(NSURLRequest.requestWithURL_(url))
+
+        self._window = window
+        self._webview = webview
+        self._nav_delegate = nav_delegate
+        self._win_delegate = win_delegate
+
+    def _sync_appearance(self):
+        # 跟 ResultWindowController 同樣的理由：常駐選單列的視窗不會自動
+        # 跟著系統深色模式切換，要每次顯示前自己讀一次目前設定再套用。
+        style = NSUserDefaults.standardUserDefaults().stringForKey_("AppleInterfaceStyle")
+        appearance_name = (
+            "NSAppearanceNameDarkAqua" if style == "Dark" else "NSAppearanceNameAqua"
+        )
+        appearance = NSAppearance.appearanceNamed_(appearance_name)
+        self._window.setAppearance_(appearance)
+        self._webview.setAppearance_(appearance)
+
+    def _compute_origin_below_status_item(self, status_item):
+        button = status_item.button()
+        if button is None or button.window() is None:
+            return None
+        # 選單列圖示所在的 NSStatusBarWindow，它的 frame 本身就已經是螢幕
+        # 座標（跟一般 App 視窗不同，不用再另外做座標轉換），左邊界+寬度
+        # 一半就是圖示中心點的 x 座標。
+        button_frame = button.window().frame()
+        screen = button.window().screen() or NSScreen.mainScreen()
+
+        x = button_frame.origin.x + button_frame.size.width / 2 - POPOVER_WIDTH / 2
+        y = button_frame.origin.y - POPOVER_HEIGHT - 4
+        if screen is not None:
+            visible = screen.visibleFrame()
+            min_x = visible.origin.x + 8
+            max_x = visible.origin.x + visible.size.width - POPOVER_WIDTH - 8
+            x = max(min_x, min(x, max_x))
+        return NSMakePoint(x, y)
+
+    def _shrunk_frame(self, final_origin):
+        """彈出動畫的起始 frame：貼著圖示下方那條邊固定不動、整個面板從
+        94% 縮小、水平置中——視覺上像是從選單列圖示底下「長出來」，而不是
+        整個方塊憑空位移。NSWindow 的 y 座標是左下角，頂邊 = origin.y +
+        height，要讓頂邊固定，縮小後的 origin.y 要往上補回少掉的高度。"""
+        start_width = POPOVER_WIDTH * POPOVER_START_SCALE
+        start_height = POPOVER_HEIGHT * POPOVER_START_SCALE
+        top_edge = final_origin.y + POPOVER_HEIGHT
+        start_x = final_origin.x + (POPOVER_WIDTH - start_width) / 2
+        start_y = top_edge - start_height
+        return NSMakeRect(start_x, start_y, start_width, start_height)
+
+    def toggle(self, status_item):
+        self._ensure_created()
+        if self._window.isVisible():
+            self.hide()
+        else:
+            self.show(status_item)
+
+    def show(self, status_item):
+        self._ensure_created()
+        final_origin = self._compute_origin_below_status_item(status_item)
+        if final_origin is None:
+            return
+        self._sync_appearance()
+        # rumps 常駐 App 沒有標準的應用程式選單，WKWebView 裡的文字框收不到
+        # Cmd+C/Cmd+V/Cmd+A 這些標準快捷鍵（macOS 是透過選單項的 key
+        # equivalent 派送到第一回應者的 -copy:/-paste:，不是 keyDown 就會
+        # 自動處理）。補這個選單本身沒有副作用，先補上；但要讓這些快捷鍵在
+        # accessory activation policy 下也生效，得暫時切成 regular policy，
+        # 這會讓 Dock 跳出圖示、左上角出現應用程式選單——這支面板刻意選擇
+        # 維持低調（不像大視窗那樣切 regular policy），所以 Cmd+C/Cmd+V/
+        # Cmd+A 這幾個快捷鍵在這個面板裡目前不會生效；文字框本身輸入/選取
+        # 不受影響，複製/貼上可以改用滑鼠右鍵選單（WKWebView 內建的
+        # 剪貼簿操作，不經過這裡的 key equivalent 派送，不受影響）。
+        _install_edit_menu()
+
+        window = self._window
+        final_frame = NSMakeRect(
+            final_origin.x, final_origin.y, POPOVER_WIDTH, POPOVER_HEIGHT
+        )
+        window.setFrame_display_(self._shrunk_frame(final_origin), False)
+        window.setAlphaValue_(0.0)
+        NSApp.activateIgnoringOtherApps_(True)
+        window.makeKeyAndOrderFront_(None)
+        window.orderFrontRegardless()
+
+        def changes(ctx):
+            ctx.setDuration_(POPOVER_SHOW_DURATION)
+            ctx.setTimingFunction_(
+                CAMediaTimingFunction.functionWithName_(kCAMediaTimingFunctionEaseOut)
+            )
+            window.animator().setAlphaValue_(1.0)
+            window.animator().setFrame_display_(final_frame, True)
+
+        NSAnimationContext.runAnimationGroup_completionHandler_(changes, None)
+
+    def hide(self):
+        window = self._window
+        if window is None or not window.isVisible():
+            return
+        final_origin = window.frame().origin
+        start_frame = self._shrunk_frame(final_origin)
+
+        def changes(ctx):
+            ctx.setDuration_(POPOVER_HIDE_DURATION)
+            ctx.setTimingFunction_(
+                CAMediaTimingFunction.functionWithName_(kCAMediaTimingFunctionEaseIn)
+            )
+            window.animator().setAlphaValue_(0.0)
+            window.animator().setFrame_display_(start_frame, True)
+
+        def completion():
+            window.orderOut_(None)
+            # 復原成正常大小/全不透明，下次 show() 的 _shrunk_frame() 起點
+            # 才會算得對，也不會下次 show() 一開始先閃一下縮小的畫面。
+            window.setFrame_display_(
+                NSMakeRect(final_origin.x, final_origin.y, POPOVER_WIDTH, POPOVER_HEIGHT),
+                False,
+            )
+            window.setAlphaValue_(1.0)
+
+        NSAnimationContext.runAnimationGroup_completionHandler_(changes, completion)
+
+    def _on_resign_key(self):
+        self.hide()
+
+    def _on_did_finish_navigation(self):
+        pass
+
+
+class _StatusItemClickTarget(NSObject):
+    """rumps 幫我們把 NSStatusItem 的 menu 設好之後，任何一種點擊（左鍵/
+    右鍵）都會直接跳原生選單、不會呼叫 button 的 target/action。要做到
+    「左鍵彈自訂面板、右鍵才叫原生選單」，得把 menu 從 status item 上拿
+    掉，改成自己接管點擊事件、右鍵時再手動 popUpContextMenu 叫出同一個
+    選單——選單本身內容/行為完全不變，只是改成手動觸發。"""
+
+    def handleStatusItemClick_(self, sender):
+        owner = getattr(self, "owner", None)
+        if owner is None:
+            return
+        event = NSApp.currentEvent()
+        is_right_click = event is not None and (
+            event.type() == NSEventTypeRightMouseUp
+            or bool(event.modifierFlags() & NSEventModifierFlagControl)
+        )
+        if is_right_click:
+            owner._show_native_menu(sender)
+        else:
+            owner._toggle_popover()
 
 
 def _install_edit_menu():
@@ -529,21 +808,13 @@ class ResultWindowController:
     def _activate_and_front(self):
         _install_edit_menu()
         self._sync_appearance()
-        # 這支 App 平常是 accessory activation policy（LSUIElement=True，
-        # 沒有 Dock 圖示）。實測過：光靠 activateIgnoringOtherApps_(True)
-        # 在 accessory policy 下常常不會真的把視窗變成 key/最前面（尤其是
-        # 從背景執行緒的工作經 callAfter 觸發的情況）——視窗物件雖然建立
-        # 成功、內容也正確，但使用者實際上看不到它跳出來、也搶不到鍵盤
-        # 焦點。暫時切成 regular policy（顯示視窗期間才會多一個 Dock 圖示）
-        # 是這類「常駐選單列但偶爾需要真正視窗」App 常見的做法，關掉視窗
-        # 後在 _on_window_hidden() 切回 accessory。
-        NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        _enter_foreground_policy()
         NSApp.activateIgnoringOtherApps_(True)
         self._window.makeKeyAndOrderFront_(None)
         self._window.orderFrontRegardless()
 
     def _on_window_hidden(self):
-        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        _exit_foreground_policy()
 
     def _on_did_finish_navigation(self):
         self._loaded = True
@@ -572,6 +843,9 @@ class TaggerMenuBarApp(rumps.App):
         )
         self.settings = load_settings()
         self.result_window = ResultWindowController(PORT)
+        self.popover = StatusPopoverController(PORT)
+        self._click_target = None
+        self._native_menu = None
 
         self.status_item = rumps.MenuItem("狀態：啟動中…")
 
@@ -612,11 +886,138 @@ class TaggerMenuBarApp(rumps.App):
 
         self._ready = False
         self._catalog_by_name = {}
+        backend_server.set_menubar_bridge(self)
         self.start_server()
         threading.Thread(target=self._watch_health, daemon=True).start()
         threading.Thread(target=self._populate_model_menu, daemon=True).start()
         threading.Thread(target=self._maybe_prompt_input_monitoring, daemon=True).start()
         self._start_hotkey_listener(self.settings["hotkey"])
+        # NSStatusItem 要等 rumps 的 run() 呼叫 initializeStatusBar() 之後
+        # 才存在，這裡先註冊，run() 裡會在 initializeStatusBar() 之後、
+        # 進事件迴圈之前呼叫到。
+        rumps_events.before_start(self._customize_status_item_click)
+
+    def _customize_status_item_click(self):
+        """把 rumps 預設「點了就跳原生選單」的行為拆成左鍵/右鍵分流：左鍵
+        彈自訂的 popover 面板，右鍵才叫出原本那個完整的原生下拉選單。"""
+        status_item = self._nsapp.nsstatusitem
+        self._native_menu = status_item.menu()
+        # 拿掉 menu 之後，左右鍵都會變成單純的 button 點擊事件（不會自動
+        # 跳選單），右鍵時我們自己用 popUpContextMenu 手動叫出存起來的
+        # 那個選單——選單內容/行為完全不變。
+        status_item.setMenu_(None)
+        button = status_item.button()
+        self._click_target = _StatusItemClickTarget.alloc().init()
+        self._click_target.owner = self
+        button.setTarget_(self._click_target)
+        button.setAction_("handleStatusItemClick:")
+        button.sendActionOn_(NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp)
+
+    def _show_native_menu(self, sender):
+        if self._native_menu is None:
+            return
+        NSMenu.popUpContextMenu_withEvent_forView_(
+            self._native_menu, NSApp.currentEvent(), sender
+        )
+
+    def _toggle_popover(self):
+        self.popover.toggle(self._nsapp.nsstatusitem)
+
+    def get_settings_payload(self):
+        """給彈出面板（跟大視窗）裡的設定齒輪區塊用：模型清單/目前選擇/
+        快捷鍵選項/目前選擇/開機自動啟動狀態，一次打包回傳。"""
+        models = [
+            {
+                "name": name,
+                "label": entry["label"],
+                "downloaded": entry["downloaded"],
+                "size_bytes": entry.get("size_bytes"),
+            }
+            for name, entry in self._catalog_by_name.items()
+        ]
+        return {
+            "model": self.settings.get("model"),
+            "models": models,
+            "hotkey": self.settings.get("hotkey"),
+            "hotkeyOptions": HOTKEY_OPTIONS,
+            "autostart": bool(self.autostart_item.state),
+        }
+
+    def select_default_model(self, name, confirmed=False):
+        """面板裡切換「預設模型」（快捷鍵標記剪貼簿時用的那個），跟原生
+        選單「模型版本」子選單選同一個模型是同一套邏輯，只是觸發來源從
+        NSMenuItem 換成 Flask 的 /settings/model。
+
+        注意：這個方法是從 Flask 自己的 request thread 呼叫進來的（就是
+        /settings/model 那個路由的 handler），不能像 _download_model 那樣
+        透過 HTTP 打回 /download_model——Flask 內建的開發伺服器預設不是
+        多執行緒，外層請求還在處理中時，同一支伺服器不會去接自己發給
+        自己的新連線，會直接卡死。這裡改成直接呼叫
+        model_downloader.download_and_extract，效果跟 /download_model
+        路由一樣，只是不繞 HTTP 那一圈。"""
+        entry = self._catalog_by_name.get(name)
+        if entry is None:
+            return {"error": f"找不到模型 {name}"}
+        if not entry["downloaded"] and not confirmed:
+            return {
+                "needs_confirm": True,
+                "label": entry["label"],
+                "size_bytes": entry.get("size_bytes"),
+            }
+        if not entry["downloaded"] and not self.is_licensed():
+            return {"error": "請先輸入授權碼才能下載模型", "license_required": True}
+        if not entry["downloaded"]:
+            manifest_entry = backend_server._manifest_entry(name)
+            if manifest_entry is None:
+                return {"error": f"找不到模型 {name}（manifest 抓不到或沒有這個名字）"}
+            try:
+                backend_server.model_downloader.download_and_extract(
+                    manifest_entry, backend_server.model_downloader.get_cache_dir()
+                )
+            except Exception as e:
+                return {"error": str(e)}
+            backend_server._model_cache.pop(name, None)
+            entry["downloaded"] = True
+            item = self.model_items.get(name)
+            if item:
+                item.title = self._model_item_label(entry)
+        for other_name, item in self.model_items.items():
+            item.state = 1 if other_name == name else 0
+        self.settings["model"] = name
+        save_settings(self.settings)
+        return {"ok": True}
+
+    def select_hotkey(self, combo):
+        if combo not in self.hotkey_items:
+            return {"error": f"不支援的快捷鍵組合 {combo}"}
+        for other_combo, item in self.hotkey_items.items():
+            item.state = 1 if other_combo == combo else 0
+        self.settings["hotkey"] = combo
+        save_settings(self.settings)
+        self._start_hotkey_listener(combo)
+        return {"ok": True}
+
+    def set_autostart(self, enabled):
+        if enabled:
+            enable_autostart()
+        else:
+            disable_autostart()
+        self.autostart_item.state = 1 if enabled else 0
+        return {"ok": True, "autostart": enabled}
+
+    def is_licensed(self):
+        # 完全離線驗證（見 license_check.py 開頭說明）——每次都重新驗證存
+        # 起來的授權碼，而不是額外存一個「licensed: true」的旗標，這樣
+        # settings.json 被手動改過（例如清掉授權碼那一行）也不會殘留一個
+        # 對不上的已授權狀態。
+        return license_check.verify_license_key(self.settings.get("license_key", ""))
+
+    def activate_license(self, key):
+        if not license_check.verify_license_key(key):
+            return {"ok": False, "error": "授權碼無效，請確認複製完整（包含開頭的 CNT1-）。"}
+        self.settings["license_key"] = key.strip()
+        save_settings(self.settings)
+        return {"ok": True}
 
     def _model_item_label(self, entry):
         if entry["downloaded"]:
@@ -651,9 +1052,11 @@ class TaggerMenuBarApp(rumps.App):
             self.model_menu.add(item)
 
         # 目前選到的模型如果還沒下載（例如第一次使用），主動在背景下載，
-        # 不用等使用者按標記才發現要下載、還得先跳確認。
+        # 不用等使用者按標記才發現要下載、還得先跳確認。沒授權碼就不主動
+        # 下載——模型檔案本身不小（好幾百 MB），沒必要幫還沒付錢的使用者
+        # 先佔頻寬/硬碟空間。
         selected = self._catalog_by_name.get(self.settings["model"])
-        if selected and not selected["downloaded"]:
+        if selected and not selected["downloaded"] and self.is_licensed():
             threading.Thread(
                 target=self._download_model, args=(self.settings["model"], False),
                 daemon=True,
@@ -662,6 +1065,18 @@ class TaggerMenuBarApp(rumps.App):
     def _download_model(self, name, ask_first):
         entry = self._catalog_by_name.get(name)
         if entry is None:
+            return False
+        if not self.is_licensed():
+            # 跟 /tag 一樣的授權檢查，這裡額外擋一層是因為模型下載走的是
+            # 獨立的 /download_model，不會經過 /tag 那個檢查點——沒授權碼
+            # 不该讓使用者連模型都下載得到。這只擋得住透過這支 App 走的
+            # 下載路徑：manifest.json 跟模型 zip 本身放在公開的 GitHub
+            # repo/release，網址不是秘密，任何人本來就可以繞過這支 App
+            # 直接用瀏覽器/curl 抓，這個檢查擋的是「透過正常管道用」的
+            # 情況，不是真正的存取控制——要做到後者得把模型放到需要驗證
+            # 才能存取的地方（例如私有 repo + 動態簽發的短期下載連結），
+            # 那就不是純離線驗證能做到的了。
+            show_dialog("這個功能需要授權碼，請先在視窗/選單列圖示的面板輸入授權碼。")
             return False
         if ask_first:
             size = entry.get("size_bytes")
@@ -781,6 +1196,9 @@ class TaggerMenuBarApp(rumps.App):
     def _tag_clipboard_thread(self):
         if not self._ready:
             show_dialog("服務尚未啟動，請稍後再試一次。")
+            return
+        if not self.is_licensed():
+            show_dialog("這個功能需要授權碼。請點選單列圖示開啟視窗，在裡面輸入授權碼後再試一次。")
             return
         self._tag_and_show(get_clipboard())
 

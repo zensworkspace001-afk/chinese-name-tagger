@@ -12,3 +12,8 @@ desktop_tagger/windows/*.zip
 
 # 模型不進 repo——執行期間從 GitHub Release 下載（見 model_downloader.py）
 desktop_tagger/backend/models/
+
+# 授權碼簽發私鑰跟已發出授權碼的紀錄——只能留在賣家自己電腦上，外流等於
+# 讓別人可以自己簽發合法授權碼（見 desktop_tagger/mac/keygen.py 開頭說明）
+desktop_tagger/mac/license_signing_key.pem
+desktop_tagger/mac/issued_licenses.csv
