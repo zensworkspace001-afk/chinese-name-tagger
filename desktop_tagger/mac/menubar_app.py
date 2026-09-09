@@ -364,31 +364,6 @@ def fetch_status():
         return None
 
 
-def download_model_api(name):
-    body = json.dumps({"model": name})
-    req = urllib.request.Request(
-        f"http://127.0.0.1:{PORT}/download_model",
-        data=body.encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
-    # 模型檔案不小，下載可能要一段時間，timeout 抓寬鬆一點。
-    try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        # /download_model 失敗時（例如 zip 結構不對、checksum 對不上）回傳
-        # 的是帶有明確原因的 JSON body（{"error": "..."}），不是單純的網路
-        # 層級錯誤。如果不特別處理，這裡會讓 urllib 直接拋出 HTTPError，
-        # 呼叫端看到的字串只會是「HTTP Error 500: INTERNAL SERVER ERROR」，
-        # 完全看不出真正的原因——這正是「下載失敗但看不出哪裡錯」的來源
-        # 之一，改成優先讀出 body 裡實際的 error 訊息往上拋。
-        try:
-            detail = json.loads(e.read().decode("utf-8")).get("error")
-        except Exception:
-            detail = None
-        raise RuntimeError(detail or f"伺服器回傳錯誤（HTTP {e.code}）") from e
-
-
 def names_to_message(data):
     if data.get("error"):
         return "錯誤：" + data["error"]
@@ -962,12 +937,15 @@ class TaggerMenuBarApp(rumps.App):
         NSMenuItem 換成 Flask 的 /settings/model。
 
         注意：這個方法是從 Flask 自己的 request thread 呼叫進來的（就是
-        /settings/model 那個路由的 handler），不能像 _download_model 那樣
-        透過 HTTP 打回 /download_model——Flask 內建的開發伺服器預設不是
-        多執行緒，外層請求還在處理中時，同一支伺服器不會去接自己發給
-        自己的新連線，會直接卡死。這裡改成直接呼叫
-        model_downloader.download_and_extract，效果跟 /download_model
-        路由一樣，只是不繞 HTTP 那一圈。"""
+        /settings/model 那個路由的 handler）。下載本身交給
+        backend_server.start_download() 在背景執行緒做、立刻回應——
+        不能在這裡同步等下載做完才回應：一來 Flask 內建的開發伺服器預設
+        不是多執行緒，外層請求還在處理中時同一支伺服器不會去接自己發給
+        自己的新連線（例如網頁那邊想輪詢進度）會直接卡死；二來就算不卡
+        死，同步阻塞也等於完全放棄了進度回報——網頁那邊只能在背景執行緒
+        真正跑起來、開始寫入 _download_progress 之後，才有進度可以輪詢
+        （用 /download_progress，見 index_html.py）。下載完成後的「切換
+        成這個模型」由 on_download_complete() 接手，不在這裡做。"""
         entry = self._catalog_by_name.get(name)
         if entry is None:
             return {"error": f"找不到模型 {name}"}
@@ -980,25 +958,41 @@ class TaggerMenuBarApp(rumps.App):
         if not entry["downloaded"] and not self.is_licensed():
             return {"error": "請先輸入授權碼才能下載模型", "license_required": True}
         if not entry["downloaded"]:
-            manifest_entry = backend_server._manifest_entry(name)
-            if manifest_entry is None:
-                return {"error": f"找不到模型 {name}（manifest 抓不到或沒有這個名字）"}
             try:
-                backend_server.model_downloader.download_and_extract(
-                    manifest_entry, backend_server.model_downloader.get_cache_dir()
-                )
+                started = backend_server.start_download(name)
             except Exception as e:
                 return {"error": str(e)}
-            backend_server._model_cache.pop(name, None)
-            entry["downloaded"] = True
-            item = self.model_items.get(name)
-            if item:
-                item.title = self._model_item_label(entry)
+            return {"ok": True, "downloading": True, "already_running": not started}
         for other_name, item in self.model_items.items():
             item.state = 1 if other_name == name else 0
         self.settings["model"] = name
         save_settings(self.settings)
         return {"ok": True}
+
+    def on_download_complete(self, name, success, error=None):
+        """backend_server.start_download() 背景執行緒下載結束時呼叫回來
+        （不管是原生選單觸發、還是設定面板觸發的下載，都會走到這裡）。
+        成功的話比照 select_default_model() 原本「下載完就切過去」的
+        行為；失敗的話只更新選單項標籤，不跳原生 dialog——這個 callback
+        可能是網頁那邊觸發的下載失敗，網頁自己會顯示 /download_progress
+        裡的 error，原生 dialog 是給原生選單那條路徑用的（見
+        _download_model()），這裡不重複跳一次。"""
+        entry = self._catalog_by_name.get(name)
+        if entry is None:
+            return
+        item = self.model_items.get(name)
+        if not success:
+            if item:
+                item.title = self._model_item_label(entry)
+            return
+        entry["downloaded"] = True
+        if item:
+            item.title = self._model_item_label(entry)
+        for other_name, other_item in self.model_items.items():
+            other_item.state = 1 if other_name == name else 0
+        self.settings["model"] = name
+        save_settings(self.settings)
+        rumps.notification("中文人名標示", "", f"模型 {entry['label']} 下載完成")
 
     def select_hotkey(self, combo):
         if combo not in self.hotkey_items:
@@ -1099,35 +1093,50 @@ class TaggerMenuBarApp(rumps.App):
 
         item = self.model_items.get(name)
         if item:
-            item.title = f"{entry['label']}（下載中…）"
+            item.title = f"{entry['label']}（下載中… 0%）"
         rumps.notification("中文人名標示", "", f"正在下載模型 {entry['label']}…")
+
+        # start_download() 只負責啟動背景執行緒，立刻回傳——真正的下載
+        # 進度靠下面輪詢 get_download_progress() 拿，不是靠這裡的回傳值。
+        # 這支方法本身已經是在背景執行緒跑的（見 _make_model_callback
+        # 用 threading.Thread 呼叫 _select_model），阻塞在下面的輪詢迴圈
+        # 不會卡住選單列 UI。
         try:
-            result = download_model_api(name)
+            backend_server.start_download(name)
         except Exception as e:
             print(f"[_download_model] exception: {e!r}", flush=True)
-            # 這裡的 e 現在可能是網路問題，也可能是 download_model_api()
-            # 從伺服器 JSON body 讀出來的具體原因（例如 zip 結構不對）——
-            # 後者重試也沒用，不要再一律建議「檢查網路連線」誤導使用者，
-            # 直接把訊息原封不動顯示，讓使用者自己判斷。
-            show_dialog(f"模型下載失敗：{e}\n\n可以從選單列「模型版本」重試，如果同樣的錯誤反覆出現，代表不是暫時性問題。")
-            if item:
-                item.title = self._model_item_label(entry)
-            return False
-        if not result.get("ok"):
-            # download_model_api() 正常回傳（HTTP 200）但 body 裡沒有
-            # ok:true——理論上不該發生（伺服器端失敗時是回 500，不是回
-            # 200 但內容有問題），這裡當防禦性檢查，避免任何未預期的
-            # response 格式被誤判成下載成功。
-            print(f"[_download_model] unexpected response: {result!r}", flush=True)
-            show_dialog(f"模型下載失敗：伺服器回應格式異常（{result}）")
+            show_dialog(f"模型下載失敗：{e}")
             if item:
                 item.title = self._model_item_label(entry)
             return False
 
-        entry["downloaded"] = True
-        if item:
-            item.title = self._model_item_label(entry)
-        rumps.notification("中文人名標示", "", f"模型 {entry['label']} 下載完成")
+        last_pct = -1
+        while True:
+            time.sleep(0.3)
+            progress = backend_server.get_download_progress(name)
+            if progress is None:
+                break
+            total = progress.get("total")
+            if total and item:
+                pct = int(progress.get("downloaded", 0) * 100 / total)
+                if pct != last_pct:
+                    last_pct = pct
+                    item.title = f"{entry['label']}（下載中… {pct}%）"
+            if progress.get("done"):
+                if progress.get("error"):
+                    show_dialog(
+                        f"模型下載失敗：{progress['error']}\n\n"
+                        "可以從選單列「模型版本」重試，如果同樣的錯誤反覆出現，代表不是暫時性問題。"
+                    )
+                    if item:
+                        item.title = self._model_item_label(entry)
+                    return False
+                break
+
+        # 下載成功後 entry["downloaded"]／item.title／self.settings["model"]
+        # 已經由 backend_server 背景執行緒透過 on_download_complete()
+        # 更新過了（同一個回呼，不管下載是原生選單還是設定面板觸發的都
+        # 會走到），這裡不用重複做，避免兩邊各自更新同一份狀態導致不一致。
         return True
 
     def _make_model_callback(self, name):

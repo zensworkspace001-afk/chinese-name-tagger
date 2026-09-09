@@ -16,6 +16,7 @@ import glob
 import os
 import re
 import sys
+import threading
 
 from flask import Flask, jsonify, request
 
@@ -50,6 +51,72 @@ PORT = 5111
 
 app = Flask(__name__)
 _model_cache = {}
+
+# 下載進度共享狀態：{model_name: {"downloaded": int, "total": int, "done": bool, "error": str|None}}。
+# 之前的做法（/download_model）是整個請求同步阻塞到下載+解壓縮都做完才
+# 回應，呼叫端（不管是選單列原生選單、還是設定面板的網頁）拿不到任何
+# 中途進度，使用者體驗上就是一段時間完全沒有回饋，看起來像卡住。改成
+# 背景執行緒下載、進度寫進這個 dict，讓 HTTP 端（/download_progress
+# 輪詢）跟同行程內的呼叫端（menubar_app.py 直接呼叫 get_download_progress）
+# 都能拿到即時進度。單純的 dict 讀寫在 CPython 因為 GIL 是原子的，這裡
+# 只是拿來顯示進度用，不是正確性攸關的臨界區，不需要額外上鎖。
+_download_progress = {}
+
+
+def start_download(name):
+    """啟動背景下載執行緒。回傳 True 表示真的啟動了一個新的下載，
+    False 表示同一個模型已經有一個下載在跑（避免使用者連續點兩次觸發
+    兩個平行下載，浪費頻寬又互相覆蓋同一個目的地資料夾）。
+
+    HTTP 端點（/download_model_async）跟 menubar_app.py 的原生選單／
+    設定面板共用這個函式，不要各自兜一份下載+進度追蹤邏輯，也不要
+    在 Flask 的 request thread 裡直接同步呼叫 download_and_extract——
+    那樣會讓進度完全回報不出來，等於白做了進度追蹤機制。"""
+    entry = _manifest_entry(name)
+    if entry is None:
+        raise ValueError(f"找不到模型 {name}（manifest 抓不到或沒有這個名字）")
+
+    existing = _download_progress.get(name)
+    if existing and not existing.get("done"):
+        return False
+
+    _download_progress[name] = {
+        "downloaded": 0,
+        "total": entry.get("size_bytes") or 0,
+        "done": False,
+        "error": None,
+    }
+
+    def on_progress(downloaded, total):
+        state = _download_progress.get(name)
+        if state is None:
+            return
+        state["downloaded"] = downloaded
+        if total:
+            state["total"] = total
+
+    def run():
+        try:
+            model_downloader.download_and_extract(
+                entry, model_downloader.get_cache_dir(), progress_cb=on_progress,
+            )
+            _model_cache.pop(name, None)
+            _download_progress[name]["done"] = True
+            if _menubar_bridge is not None:
+                _menubar_bridge.on_download_complete(name, success=True)
+        except Exception as e:
+            print(f"[start_download] failed: {e!r}", flush=True)
+            _download_progress[name]["error"] = str(e)
+            _download_progress[name]["done"] = True
+            if _menubar_bridge is not None:
+                _menubar_bridge.on_download_complete(name, success=False, error=str(e))
+
+    threading.Thread(target=run, daemon=True).start()
+    return True
+
+
+def get_download_progress(name):
+    return _download_progress.get(name)
 _manifest_cache_path = os.path.normpath(
     os.path.join(model_downloader.get_cache_dir(), "..", "models_manifest_cache.json")
 )
@@ -189,6 +256,36 @@ def api_download_model():
 
     _model_cache.pop(name, None)  # 逼下次 get_model 重新載入剛下載的版本
     return jsonify({"ok": True, "model": name})
+
+
+@app.route("/download_model_async", methods=["POST"])
+def api_download_model_async():
+    """跟 /download_model 做同一件事，差別是立刻回應、不等下載完成——
+    網頁面板改用這個端點，搭配 /download_progress 輪詢，才做得出真正的
+    進度條。舊的 /download_model（同步阻塞版）繼續保留，不動它的行為。"""
+    if _menubar_bridge is not None and not _menubar_bridge.is_licensed():
+        return jsonify({"error": "請先輸入授權碼才能下載模型", "license_required": True}), 402
+
+    data = request.get_json(force=True) or {}
+    name = data.get("model")
+    if not name:
+        return jsonify({"error": "沒有指定 model"}), 400
+
+    try:
+        started = start_download(name)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 404
+
+    return jsonify({"ok": True, "downloading": True, "already_running": not started})
+
+
+@app.route("/download_progress")
+def api_download_progress():
+    name = request.args.get("model", "")
+    state = get_download_progress(name)
+    if state is None:
+        return jsonify({"downloaded": 0, "total": 0, "done": False, "error": None, "not_started": True})
+    return jsonify(state)
 
 
 @app.route("/settings")

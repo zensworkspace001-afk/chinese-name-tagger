@@ -214,6 +214,15 @@ INDEX_HTML = """<!doctype html>
   .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .settings-row .settings-label { font-size: 13px; color: var(--text); }
   .settings-row .settings-hint { font-size: 11.5px; color: var(--muted-2); margin-top: 2px; }
+  .download-progress-row { padding: 4px 0 10px; }
+  .download-progress-label { font-size: 11.5px; color: var(--muted); margin-bottom: 5px; }
+  .download-progress-track {
+    width: 100%; height: 6px; border-radius: 999px; background: var(--card-2); overflow: hidden;
+  }
+  .download-progress-fill {
+    height: 100%; width: 0%; background: var(--accent); border-radius: 999px;
+    transition: width .2s ease;
+  }
   .settings-row select {
     width: auto; min-width: 160px; font-size: 12.5px; padding: 7px 10px;
   }
@@ -412,6 +421,10 @@ INDEX_HTML = """<!doctype html>
       </div>
       <select id="settings-model"></select>
     </div>
+    <div class="download-progress-row" id="download-progress-row" hidden>
+      <div class="download-progress-label" id="download-progress-label"></div>
+      <div class="download-progress-track"><div class="download-progress-fill" id="download-progress-fill"></div></div>
+    </div>
     <div class="settings-row">
       <div class="settings-label">快捷鍵</div>
       <select id="settings-hotkey"></select>
@@ -499,6 +512,9 @@ const maskSymbolInput = document.getElementById('mask-symbol');
 const settingsBtn = document.getElementById('settings-btn');
 const settingsPanel = document.getElementById('settings-panel');
 const settingsModelSelect = document.getElementById('settings-model');
+const downloadProgressRow = document.getElementById('download-progress-row');
+const downloadProgressLabel = document.getElementById('download-progress-label');
+const downloadProgressFill = document.getElementById('download-progress-fill');
 const settingsHotkeySelect = document.getElementById('settings-hotkey');
 const settingsAutostartToggle = document.getElementById('settings-autostart');
 const licenseGate = document.getElementById('license-gate');
@@ -747,6 +763,44 @@ settingsBtn.addEventListener('click', () => {
   if (show) loadSettings();
 });
 
+// 輪詢 /download_progress 直到下載完成（或失敗），中途即時更新進度條。
+// 下載本身是 /settings/model {confirmed:true} 觸發的背景執行緒（見
+// menubar_app.py::select_default_model），這裡只負責顯示進度、不負責
+// 觸發下載，也不負責下載完成後的「切換成這個模型」——那件事由
+// on_download_complete() 在背景執行緒那邊做完了，這裡輪詢到 done:true
+// 之後只需要重新整理設定面板（loadSettings），把「未下載」標籤真正
+// 移除掉。
+async function pollDownloadProgress(name, label) {
+  downloadProgressRow.hidden = false;
+  downloadProgressFill.style.width = '0%';
+  downloadProgressLabel.textContent = `正在下載 ${label}…`;
+  try {
+    while (true) {
+      await new Promise(r => setTimeout(r, 400));
+      const res = await fetch(`/download_progress?model=${encodeURIComponent(name)}`);
+      const data = await res.json();
+      if (data.total) {
+        const pct = Math.min(100, Math.round((data.downloaded / data.total) * 100));
+        downloadProgressFill.style.width = `${pct}%`;
+        downloadProgressLabel.textContent = `正在下載 ${label}… ${pct}%`;
+      }
+      if (data.done) {
+        if (data.error) {
+          showBanner(`模型下載失敗：${data.error}`);
+        } else {
+          downloadProgressFill.style.width = '100%';
+          downloadProgressLabel.textContent = `${label} 下載完成`;
+        }
+        break;
+      }
+    }
+  } finally {
+    // 完成/失敗都停留一下讓使用者看到「100%」或錯誤訊息，再收起進度條，
+    // 不要一結束就立刻消失，使用者會來不及看清楚結果。
+    setTimeout(() => { downloadProgressRow.hidden = true; }, 1200);
+  }
+}
+
 settingsModelSelect.addEventListener('change', async () => {
   const name = settingsModelSelect.value;
   try {
@@ -756,13 +810,20 @@ settingsModelSelect.addEventListener('change', async () => {
     });
     let data = await res.json();
     if (data.needs_confirm) {
-      const size = data.size_bytes ? `（約 ${(data.size_bytes / 1e6).toFixed(0)}MB）` : '';
-      showBanner(`模型「${data.label}」尚未下載${size}，正在下載…`);
+      // 網頁面板這條路線原本設計就是選了直接下載、不另外跳確認對話框
+      // （原生選單才有 confirm_dialog，那是走 macOS 原生對話框；WKWebView
+      // 不保證有實作 JS confirm() 的 delegate，這裡不引入沒驗證過的
+      // window.confirm() 呼叫）。label 要在這裡先存下來，因為
+      // /settings/model 第二次（confirmed）的回應不會再帶 label。
+      const label = data.label || name;
       res = await fetch('/settings/model', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: name, confirmed: true }),
       });
       data = await res.json();
+      if (data.downloading) {
+        await pollDownloadProgress(name, label);
+      }
     }
     if (data.error) { showBanner('模型切換失敗：' + data.error); }
   } catch (e) {
