@@ -372,8 +372,21 @@ def download_model_api(name):
         headers={"Content-Type": "application/json"},
     )
     # 模型檔案不小，下載可能要一段時間，timeout 抓寬鬆一點。
-    with urllib.request.urlopen(req, timeout=600) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # /download_model 失敗時（例如 zip 結構不對、checksum 對不上）回傳
+        # 的是帶有明確原因的 JSON body（{"error": "..."}），不是單純的網路
+        # 層級錯誤。如果不特別處理，這裡會讓 urllib 直接拋出 HTTPError，
+        # 呼叫端看到的字串只會是「HTTP Error 500: INTERNAL SERVER ERROR」，
+        # 完全看不出真正的原因——這正是「下載失敗但看不出哪裡錯」的來源
+        # 之一，改成優先讀出 body 裡實際的 error 訊息往上拋。
+        try:
+            detail = json.loads(e.read().decode("utf-8")).get("error")
+        except Exception:
+            detail = None
+        raise RuntimeError(detail or f"伺服器回傳錯誤（HTTP {e.code}）") from e
 
 
 def names_to_message(data):
@@ -1089,10 +1102,24 @@ class TaggerMenuBarApp(rumps.App):
             item.title = f"{entry['label']}（下載中…）"
         rumps.notification("中文人名標示", "", f"正在下載模型 {entry['label']}…")
         try:
-            download_model_api(name)
+            result = download_model_api(name)
         except Exception as e:
             print(f"[_download_model] exception: {e!r}", flush=True)
-            show_dialog(f"模型下載失敗：{e}\n\n請檢查網路連線，稍後可以再從選單列「模型版本」重試。")
+            # 這裡的 e 現在可能是網路問題，也可能是 download_model_api()
+            # 從伺服器 JSON body 讀出來的具體原因（例如 zip 結構不對）——
+            # 後者重試也沒用，不要再一律建議「檢查網路連線」誤導使用者，
+            # 直接把訊息原封不動顯示，讓使用者自己判斷。
+            show_dialog(f"模型下載失敗：{e}\n\n可以從選單列「模型版本」重試，如果同樣的錯誤反覆出現，代表不是暫時性問題。")
+            if item:
+                item.title = self._model_item_label(entry)
+            return False
+        if not result.get("ok"):
+            # download_model_api() 正常回傳（HTTP 200）但 body 裡沒有
+            # ok:true——理論上不該發生（伺服器端失敗時是回 500，不是回
+            # 200 但內容有問題），這裡當防禦性檢查，避免任何未預期的
+            # response 格式被誤判成下載成功。
+            print(f"[_download_model] unexpected response: {result!r}", flush=True)
+            show_dialog(f"模型下載失敗：伺服器回應格式異常（{result}）")
             if item:
                 item.title = self._model_item_label(entry)
             return False

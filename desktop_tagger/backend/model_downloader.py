@@ -174,6 +174,25 @@ def download_and_extract(model_entry, cache_dir, progress_cb=None):
         with zipfile.ZipFile(tmp_path) as zf:
             _safe_extract(zf, model_dir)
 
+        # 驗證解壓縮後 config.json 真的在 model_dir 底下（不是被包在 zip
+        # 裡多一層跟模型同名的資料夾，變成 model_dir/<name>/config.json）。
+        # 這個問題實際發生過：zip 打包時如果從資料夾「外層」打包
+        # （例如 zip -r x.zip model_bert_xxx/ 而不是進到資料夾內用
+        # zip -r x.zip .），解壓縮會多一層路徑，is_downloaded() 永遠會
+        # 判斷成「沒下載」，但這支函式本身卻正常回傳、寫入版本標記檔，
+        # 從呼叫端看起來像是「下載成功」——使用者看到的就是磁碟空間被
+        # 佔用了、卻怎麼樣都用不了、也沒有任何錯誤訊息可以排查。現在
+        # 直接在這裡擋下來，清掉半殘的資料夾，並丟出明確講清楚問題在哪
+        # 的錯誤，而不是留一個看起來下載完成、實際上壞掉的狀態。
+        if not os.path.isfile(os.path.join(model_dir, "config.json")):
+            shutil.rmtree(model_dir, ignore_errors=True)
+            raise ValueError(
+                f"解壓縮後找不到 {name}/config.json——zip 檔案結構不正確"
+                "（可能在打包時多包了一層跟模型同名的資料夾）。這是模型"
+                "打包端的問題，不是網路或磁碟空間問題，重新下載無法解決，"
+                "需要重新打包正確結構的 zip。"
+            )
+
         with open(_version_marker_path(model_dir), "w", encoding="utf-8") as f:
             f.write(str(model_entry.get("version", 1)))
     finally:

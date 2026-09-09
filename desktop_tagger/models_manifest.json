@@ -21,10 +21,10 @@
     {
       "name": "model_bert_colab_v6b",
       "label": "colab_v6b（新增外語音譯／日文人名，實驗性）",
-      "version": 1,
+      "version": 2,
       "url": "https://github.com/zensworkspace001-afk/chinese-name-tagger/releases/download/models-v1/model_bert_colab_v6b.zip",
-      "sha256": "326b578428476ba50260b14605a751997c2c76d4249d894d7b655e49a9e2b9b9",
-      "size_bytes": 377360233,
+      "sha256": "2b1ee9fc4bf4efb13f1377b730ed738b328f5d6ec6be01f582a814d3a8065d8f",
+      "size_bytes": 377359895,
       "default": false
     }
   ]
