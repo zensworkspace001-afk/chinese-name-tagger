@@ -732,13 +732,24 @@ async function loadStatus() {
     const res = await fetch('/status');
     const data = await res.json();
     modelSelect.innerHTML = '';
-    (data.models || []).forEach(m => {
+    // 這個下拉選單是主畫面「馬上分析文字」用的，只列出已經下載完成、
+    // 真的能立刻拿來跑 /tag 的模型——未下載的模型選了也不能用（還要
+    // 先跑一次下載），要下載新模型請到「設定」齒輪的「預設模型」，
+    // 那邊才是設計來處理下載流程的地方，這裡只做「選一個能用的」。
+    const usable = (data.models || []).filter(m => m.downloaded);
+    usable.forEach(m => {
       const opt = document.createElement('option');
       opt.value = m.name;
-      opt.textContent = m.downloaded ? m.label : `${m.label}（未下載）`;
+      opt.textContent = m.label;
       if (m.name === data.default) opt.selected = true;
       modelSelect.appendChild(opt);
     });
+    if (usable.length === 0) {
+      const opt = document.createElement('option');
+      opt.textContent = '（沒有已下載的模型，請到設定下載）';
+      opt.disabled = true;
+      modelSelect.appendChild(opt);
+    }
     statusDot.classList.add('on');
     statusText.textContent = '已連線';
   } catch (e) {
@@ -816,7 +827,10 @@ async function deleteModel(name, label) {
   } catch (e) {
     showBanner('刪除失敗：' + e);
   } finally {
+    // 同上：modelSelect（主畫面）跟 settingsModelSelect/downloadedModelsList
+    // （設定面板）是各自獨立載入的，刪除完兩個都要刷新。
     loadSettings();
+    loadStatus();
   }
 }
 
@@ -893,7 +907,12 @@ settingsModelSelect.addEventListener('change', async () => {
   } catch (e) {
     showBanner('模型切換失敗：' + e);
   } finally {
+    // 主畫面「模型」下拉選單（modelSelect，loadStatus() 填的）跟設定
+    // 面板的「預設模型」/「已下載的模型」（loadSettings() 填的）是各自
+    // 獨立載入的兩份 UI，只呼叫其中一個，另一個就會顯示過期的模型清單
+    // ——這裡下載/切換完都要兩個一起刷新，不能只刷設定面板那邊。
     loadSettings();
+    loadStatus();
   }
 });
 
