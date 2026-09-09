@@ -429,7 +429,16 @@ def _install_edit_menu():
         return
 
     main_menu = NSMenu.alloc().init()
-    main_menu.addItem_(NSMenuItem.alloc().init())  # App 選單（留空即可）
+
+    # 選單列最左邊的「應用程式選單」（macOS 會自動把它顯示成 App 名稱，
+    # 不管這裡設什麼 title）——關鍵是這個第一個項目一定要掛一個 submenu
+    # （就算是空的），macOS 才會把它辨識成應用程式選單。原本這裡只加了
+    # 一個完全空、沒有 submenu 的 NSMenuItem，macOS 認不出那是應用程式
+    # 選單的位置，導致緊接著的「編輯」變成視覺上排第一個、跑到左上角。
+    app_menu_item = NSMenuItem.alloc().init()
+    app_menu = NSMenu.alloc().init()
+    app_menu_item.setSubmenu_(app_menu)
+    main_menu.addItem_(app_menu_item)
 
     edit_menu = NSMenu.alloc().initWithTitle_("編輯")
     edit_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
