@@ -82,31 +82,19 @@ def _safe_pynput_handle_message(self, _proxy, event_type, event, _refcon, inject
 
 _pynput_darwin.Listener._handle_message = _safe_pynput_handle_message
 
-from Foundation import NSObject, NSURL, NSURLRequest, NSMakeRect, NSMakePoint, NSUserDefaults
-from Quartz import CAMediaTimingFunction, kCAMediaTimingFunctionEaseIn, kCAMediaTimingFunctionEaseOut
+from Foundation import NSObject, NSURL, NSURLRequest, NSMakeRect, NSUserDefaults
 from AppKit import (
     NSApp,
-    NSAnimationContext,
     NSAppearance,
-    NSColor,
-    NSEventMaskLeftMouseUp,
-    NSEventMaskRightMouseUp,
-    NSEventModifierFlagControl,
-    NSEventTypeRightMouseUp,
     NSMenu,
     NSMenuItem,
-    NSScreen,
     NSWindow,
     NSApplicationActivationPolicyAccessory,
     NSApplicationActivationPolicyRegular,
     NSBackingStoreBuffered,
-    NSPopUpMenuWindowLevel,
-    NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSWindowCollectionBehaviorMoveToActiveSpace,
-    NSWindowCollectionBehaviorTransient,
     NSViewWidthSizable,
     NSViewHeightSizable,
-    NSWindowStyleMaskBorderless,
     NSWindowStyleMaskTitled,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskResizable,
@@ -114,7 +102,6 @@ from AppKit import (
 )
 from WebKit import WKWebView, WKWebViewConfiguration
 from PyObjCTools import AppHelper
-from rumps import events as rumps_events
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     BASE_DIR = sys._MEIPASS
@@ -429,241 +416,6 @@ class _ResultWindowDelegate(NSObject):
         return False
 
 
-POPOVER_WIDTH = 640
-POPOVER_HEIGHT = 420
-# 彈出動畫：從「貼著圖示下方、縮小到 94%」的狀態，同時放大到 100%＋淡入，
-# 感覺像從圖示那裡「長出來」——只用線性淡入淡出+位移看起來很機械，一定
-# 要搭配 ease 曲線＋縮放才會有原生 App 那種「彈」的質感。收起來的動畫
-# 刻意比彈出快一點（人對「東西消失」比「東西出現」更沒耐性等）。
-POPOVER_SHOW_DURATION = 0.22
-POPOVER_HIDE_DURATION = 0.16
-POPOVER_START_SCALE = 0.94
-
-
-class _PopoverPanel(NSWindow):
-    """無邊框視窗預設 canBecomeKeyWindow 回 False（AppKit 假設無邊框視窗
-    大多是提示框、不需要拿鍵盤焦點），面板裡的文字框會完全打不了字。
-    覆寫成 True 才能讓面板正常接收鍵盤輸入，同時仍維持沒有標題列/邊框的
-    外觀（跟原生選單/Claude 的彈出面板一樣）。"""
-
-    def canBecomeKeyWindow(self):
-        return True
-
-
-class _PopoverWebViewNavDelegate(NSObject):
-    def webView_didFinishNavigation_(self, webView, navigation):
-        if getattr(self, "owner", None) is not None:
-            self.owner._on_did_finish_navigation()
-
-
-class _PopoverWindowDelegate(NSObject):
-    """點面板外面（面板失去 key window 身份）就自動收起來，這是 popover
-    最基本的互動預期——跟原本置中大視窗不同，不需要使用者自己按關閉。"""
-
-    def windowDidResignKey_(self, notification):
-        if getattr(self, "owner", None) is not None:
-            self.owner._on_resign_key()
-
-
-class StatusPopoverController:
-    """左鍵點選單列圖示彈出的小面板：貼著圖示正下方彈出、點外面自動收起
-    來，外觀/互動模仿 Claude 桌面版選單列圖示的做法。跟 ResultWindowController
-    差別只在視窗本身的樣式跟顯示/隱藏邏輯——內容一樣是載入 server.py 出的
-    同一個頁面（含標記人名跟設定），兩邊功能永遠一致，不用維護兩份 UI。"""
-
-    def __init__(self, port):
-        self._port = port
-        self._window = None
-        self._webview = None
-
-    def _ensure_created(self):
-        if self._window is not None:
-            return
-        rect = NSMakeRect(0, 0, POPOVER_WIDTH, POPOVER_HEIGHT)
-        window = _PopoverPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            rect, NSWindowStyleMaskBorderless, NSBackingStoreBuffered, False
-        )
-        window.setReleasedWhenClosed_(False)
-        window.setOpaque_(False)
-        window.setHasShadow_(True)
-        window.setBackgroundColor_(NSColor.clearColor())
-        # NSPopUpMenuWindowLevel 讓面板浮在一般 App 視窗之上（包括全螢幕
-        # 視窗），跟選單本身的層級一致——選單列小工具彈出的東西理當跟選單
-        # 一樣「隨時蓋在最上面」，不會被使用者正在用的其他視窗擋住。
-        window.setLevel_(NSPopUpMenuWindowLevel)
-        window.setCollectionBehavior_(
-            NSWindowCollectionBehaviorCanJoinAllSpaces
-            | NSWindowCollectionBehaviorTransient
-        )
-
-        webview = WKWebView.alloc().initWithFrame_configuration_(
-            rect, WKWebViewConfiguration.alloc().init()
-        )
-        webview.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
-        # 圓角＋陰影：面板沒有原生視窗的標題列/邊框，這是唯一讓它看起來是
-        # 「浮出來的卡片」而不是螢幕上一塊突兀方形的手段。
-        webview.setWantsLayer_(True)
-        webview.layer().setCornerRadius_(12)
-        webview.layer().setMasksToBounds_(True)
-
-        nav_delegate = _PopoverWebViewNavDelegate.alloc().init()
-        nav_delegate.owner = self
-        webview.setNavigationDelegate_(nav_delegate)
-
-        win_delegate = _PopoverWindowDelegate.alloc().init()
-        win_delegate.owner = self
-        window.setDelegate_(win_delegate)
-        window.setContentView_(webview)
-
-        url = NSURL.URLWithString_(f"http://127.0.0.1:{self._port}/")
-        webview.loadRequest_(NSURLRequest.requestWithURL_(url))
-
-        self._window = window
-        self._webview = webview
-        self._nav_delegate = nav_delegate
-        self._win_delegate = win_delegate
-
-    def _sync_appearance(self):
-        # 跟 ResultWindowController 同樣的理由：常駐選單列的視窗不會自動
-        # 跟著系統深色模式切換，要每次顯示前自己讀一次目前設定再套用。
-        style = NSUserDefaults.standardUserDefaults().stringForKey_("AppleInterfaceStyle")
-        appearance_name = (
-            "NSAppearanceNameDarkAqua" if style == "Dark" else "NSAppearanceNameAqua"
-        )
-        appearance = NSAppearance.appearanceNamed_(appearance_name)
-        self._window.setAppearance_(appearance)
-        self._webview.setAppearance_(appearance)
-
-    def _compute_origin_below_status_item(self, status_item):
-        button = status_item.button()
-        if button is None or button.window() is None:
-            return None
-        # 選單列圖示所在的 NSStatusBarWindow，它的 frame 本身就已經是螢幕
-        # 座標（跟一般 App 視窗不同，不用再另外做座標轉換），左邊界+寬度
-        # 一半就是圖示中心點的 x 座標。
-        button_frame = button.window().frame()
-        screen = button.window().screen() or NSScreen.mainScreen()
-
-        x = button_frame.origin.x + button_frame.size.width / 2 - POPOVER_WIDTH / 2
-        y = button_frame.origin.y - POPOVER_HEIGHT - 4
-        if screen is not None:
-            visible = screen.visibleFrame()
-            min_x = visible.origin.x + 8
-            max_x = visible.origin.x + visible.size.width - POPOVER_WIDTH - 8
-            x = max(min_x, min(x, max_x))
-        return NSMakePoint(x, y)
-
-    def _shrunk_frame(self, final_origin):
-        """彈出動畫的起始 frame：貼著圖示下方那條邊固定不動、整個面板從
-        94% 縮小、水平置中——視覺上像是從選單列圖示底下「長出來」，而不是
-        整個方塊憑空位移。NSWindow 的 y 座標是左下角，頂邊 = origin.y +
-        height，要讓頂邊固定，縮小後的 origin.y 要往上補回少掉的高度。"""
-        start_width = POPOVER_WIDTH * POPOVER_START_SCALE
-        start_height = POPOVER_HEIGHT * POPOVER_START_SCALE
-        top_edge = final_origin.y + POPOVER_HEIGHT
-        start_x = final_origin.x + (POPOVER_WIDTH - start_width) / 2
-        start_y = top_edge - start_height
-        return NSMakeRect(start_x, start_y, start_width, start_height)
-
-    def toggle(self, status_item):
-        self._ensure_created()
-        if self._window.isVisible():
-            self.hide()
-        else:
-            self.show(status_item)
-
-    def show(self, status_item):
-        self._ensure_created()
-        final_origin = self._compute_origin_below_status_item(status_item)
-        if final_origin is None:
-            return
-        self._sync_appearance()
-        # rumps 常駐 App 沒有標準的應用程式選單，WKWebView 裡的文字框收不到
-        # Cmd+C/Cmd+V/Cmd+A 這些標準快捷鍵（macOS 是透過選單項的 key
-        # equivalent 派送到第一回應者的 -copy:/-paste:，不是 keyDown 就會
-        # 自動處理）。補這個選單本身沒有副作用，先補上；但要讓這些快捷鍵在
-        # accessory activation policy 下也生效，得暫時切成 regular policy，
-        # 這會讓 Dock 跳出圖示、左上角出現應用程式選單——這支面板刻意選擇
-        # 維持低調（不像大視窗那樣切 regular policy），所以 Cmd+C/Cmd+V/
-        # Cmd+A 這幾個快捷鍵在這個面板裡目前不會生效；文字框本身輸入/選取
-        # 不受影響，複製/貼上可以改用滑鼠右鍵選單（WKWebView 內建的
-        # 剪貼簿操作，不經過這裡的 key equivalent 派送，不受影響）。
-        _install_edit_menu()
-
-        window = self._window
-        final_frame = NSMakeRect(
-            final_origin.x, final_origin.y, POPOVER_WIDTH, POPOVER_HEIGHT
-        )
-        window.setFrame_display_(self._shrunk_frame(final_origin), False)
-        window.setAlphaValue_(0.0)
-        NSApp.activateIgnoringOtherApps_(True)
-        window.makeKeyAndOrderFront_(None)
-        window.orderFrontRegardless()
-
-        def changes(ctx):
-            ctx.setDuration_(POPOVER_SHOW_DURATION)
-            ctx.setTimingFunction_(
-                CAMediaTimingFunction.functionWithName_(kCAMediaTimingFunctionEaseOut)
-            )
-            window.animator().setAlphaValue_(1.0)
-            window.animator().setFrame_display_(final_frame, True)
-
-        NSAnimationContext.runAnimationGroup_completionHandler_(changes, None)
-
-    def hide(self):
-        window = self._window
-        if window is None or not window.isVisible():
-            return
-        final_origin = window.frame().origin
-        start_frame = self._shrunk_frame(final_origin)
-
-        def changes(ctx):
-            ctx.setDuration_(POPOVER_HIDE_DURATION)
-            ctx.setTimingFunction_(
-                CAMediaTimingFunction.functionWithName_(kCAMediaTimingFunctionEaseIn)
-            )
-            window.animator().setAlphaValue_(0.0)
-            window.animator().setFrame_display_(start_frame, True)
-
-        def completion():
-            window.orderOut_(None)
-            # 復原成正常大小/全不透明，下次 show() 的 _shrunk_frame() 起點
-            # 才會算得對，也不會下次 show() 一開始先閃一下縮小的畫面。
-            window.setFrame_display_(
-                NSMakeRect(final_origin.x, final_origin.y, POPOVER_WIDTH, POPOVER_HEIGHT),
-                False,
-            )
-            window.setAlphaValue_(1.0)
-
-        NSAnimationContext.runAnimationGroup_completionHandler_(changes, completion)
-
-    def _on_resign_key(self):
-        self.hide()
-
-    def _on_did_finish_navigation(self):
-        pass
-
-
-class _StatusItemClickTarget(NSObject):
-    """rumps 幫我們把 NSStatusItem 的 menu 設好之後，任何一種點擊（左鍵/
-    右鍵）都會直接跳原生選單、不會呼叫 button 的 target/action。要做到
-    「左鍵彈自訂面板、右鍵才叫原生選單」，得把 menu 從 status item 上拿
-    掉，改成自己接管點擊事件、右鍵時再手動 popUpContextMenu 叫出同一個
-    選單——選單本身內容/行為完全不變，只是改成手動觸發。"""
-
-    def handleStatusItemClick_(self, sender):
-        owner = getattr(self, "owner", None)
-        if owner is None:
-            return
-        event = NSApp.currentEvent()
-        is_right_click = event is not None and (
-            event.type() == NSEventTypeRightMouseUp
-            or bool(event.modifierFlags() & NSEventModifierFlagControl)
-        )
-        if is_right_click:
-            owner._show_native_menu(sender)
-        else:
-            owner._toggle_popover()
 
 
 def _install_edit_menu():
@@ -800,6 +552,15 @@ class ResultWindowController:
         NSApp.activateIgnoringOtherApps_(True)
         self._window.makeKeyAndOrderFront_(None)
         self._window.orderFrontRegardless()
+        if self._loaded:
+            # 這個視窗是 singleton，show/hide 之間網頁不會重新載入——關掉
+            # 再打開看到的還是上次的舊狀態（模型清單、下載/刪除狀態等）。
+            # 每次視窗要顯示出來之前主動重新整理一次，不然會顯示跟後端
+            # 對不上的過期資料（例如剛才在這個視窗下載了模型，下次打開
+            # 應該要看到已下載，而不是停在上次打開當下的快照）。
+            self._webview.evaluateJavaScript_completionHandler_(
+                "loadStatus(); loadSettings();", None
+            )
 
     def _on_window_hidden(self):
         _exit_foreground_policy()
@@ -831,9 +592,6 @@ class TaggerMenuBarApp(rumps.App):
         )
         self.settings = load_settings()
         self.result_window = ResultWindowController(PORT)
-        self.popover = StatusPopoverController(PORT)
-        self._click_target = None
-        self._native_menu = None
 
         self.status_item = rumps.MenuItem("狀態：啟動中…")
 
@@ -886,36 +644,11 @@ class TaggerMenuBarApp(rumps.App):
         threading.Thread(target=self._populate_model_menu, daemon=True).start()
         threading.Thread(target=self._maybe_prompt_input_monitoring, daemon=True).start()
         self._start_hotkey_listener(self.settings["hotkey"])
-        # NSStatusItem 要等 rumps 的 run() 呼叫 initializeStatusBar() 之後
-        # 才存在，這裡先註冊，run() 裡會在 initializeStatusBar() 之後、
-        # 進事件迴圈之前呼叫到。
-        rumps_events.before_start(self._customize_status_item_click)
-
-    def _customize_status_item_click(self):
-        """把 rumps 預設「點了就跳原生選單」的行為拆成左鍵/右鍵分流：左鍵
-        彈自訂的 popover 面板，右鍵才叫出原本那個完整的原生下拉選單。"""
-        status_item = self._nsapp.nsstatusitem
-        self._native_menu = status_item.menu()
-        # 拿掉 menu 之後，左右鍵都會變成單純的 button 點擊事件（不會自動
-        # 跳選單），右鍵時我們自己用 popUpContextMenu 手動叫出存起來的
-        # 那個選單——選單內容/行為完全不變。
-        status_item.setMenu_(None)
-        button = status_item.button()
-        self._click_target = _StatusItemClickTarget.alloc().init()
-        self._click_target.owner = self
-        button.setTarget_(self._click_target)
-        button.setAction_("handleStatusItemClick:")
-        button.sendActionOn_(NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp)
-
-    def _show_native_menu(self, sender):
-        if self._native_menu is None:
-            return
-        NSMenu.popUpContextMenu_withEvent_forView_(
-            self._native_menu, NSApp.currentEvent(), sender
-        )
-
-    def _toggle_popover(self):
-        self.popover.toggle(self._nsapp.nsstatusitem)
+        # 左鍵/右鍵都用 rumps 內建的原生下拉選單（之前左鍵是彈自訂的小面板，
+        # 跟「開啟視窗」是兩個各自獨立的 WKWebView，狀態容易不同步——已經
+        # 移除那個面板，選單列圖示不管左右鍵都跳同一個原生選單，跟這支
+        # App 唯一的另一個視窗（ResultWindowController）行為一致，不需要
+        # 再自己接管點擊事件）。
 
     def get_settings_payload(self):
         """給彈出面板（跟大視窗）裡的設定齒輪區塊用：模型清單/目前選擇/
@@ -969,11 +702,19 @@ class TaggerMenuBarApp(rumps.App):
             except Exception as e:
                 return {"error": str(e)}
             return {"ok": True, "downloading": True, "already_running": not started}
-        for other_name, item in self.model_items.items():
-            item.state = 1 if other_name == name else 0
+        # 這個 method 是 Flask request thread 呼叫進來的（見上面的
+        # docstring），下面對 model_items 的 .state 賦值是 NSMenuItem
+        # 操作，AppKit 不是執行緒安全的，一定要透過 AppHelper.callAfter()
+        # 排回主執行緒做——ResultWindowController 開頭的 docstring已經
+        # 講過同一條規則，這裡沿用。settings 存檔跟回傳值不涉及 Cocoa，
+        # 留在原本的執行緒同步做就好，不用一起等主執行緒排隊。
+        def apply_selection():
+            for other_name, item in self.model_items.items():
+                item.state = 1 if other_name == name else 0
+            self._refresh_delete_menu()
+        AppHelper.callAfter(apply_selection)
         self.settings["model"] = name
         save_settings(self.settings)
-        self._refresh_delete_menu()
         return {"ok": True}
 
     def on_download_complete(self, name, success, error=None):
@@ -983,38 +724,49 @@ class TaggerMenuBarApp(rumps.App):
         行為；失敗的話只更新選單項標籤，不跳原生 dialog——這個 callback
         可能是網頁那邊觸發的下載失敗，網頁自己會顯示 /download_progress
         裡的 error，原生 dialog 是給原生選單那條路徑用的（見
-        _download_model()），這裡不重複跳一次。"""
-        entry = self._catalog_by_name.get(name)
-        if entry is None:
-            return
-        item = self.model_items.get(name)
-        if not success:
+        _download_model()），這裡不重複跳一次。
+
+        整個方法一定是背景執行緒呼叫進來的（start_download() 內部的
+        download thread），裡面每一步都碰 NSMenuItem，全部包進
+        AppHelper.callAfter() 排回主執行緒，不要只包一部分——分開包
+        容易在中間漏掉一處，乾脆整個 apply() 一起排隊，用同一個
+        run loop tick 處理完，狀態也不會有「UI 更新到一半」的中間態。"""
+        def apply():
+            entry = self._catalog_by_name.get(name)
+            if entry is None:
+                return
+            item = self.model_items.get(name)
+            if not success:
+                if item:
+                    item.title = self._model_item_label(entry)
+                return
+            entry["downloaded"] = True
             if item:
                 item.title = self._model_item_label(entry)
-            return
-        entry["downloaded"] = True
-        if item:
-            item.title = self._model_item_label(entry)
-        for other_name, other_item in self.model_items.items():
-            other_item.state = 1 if other_name == name else 0
-        self.settings["model"] = name
-        save_settings(self.settings)
-        rumps.notification("中文人名標示", "", f"模型 {entry['label']} 下載完成")
-        self._refresh_delete_menu()
+            for other_name, other_item in self.model_items.items():
+                other_item.state = 1 if other_name == name else 0
+            self.settings["model"] = name
+            save_settings(self.settings)
+            rumps.notification("中文人名標示", "", f"模型 {entry['label']} 下載完成")
+            self._refresh_delete_menu()
+        AppHelper.callAfter(apply)
 
     def on_model_deleted(self, name):
         """backend_server 的 /delete_model 端點刪除成功時呼叫回來（網頁
         設定面板觸發刪除會走這條路；原生選單觸發刪除走 _delete_model()，
         兩邊最後都會呼叫這裡或做等價的狀態更新，確保不管從哪個介面刪的，
-        另一個介面看到的狀態都是一致的）。"""
-        entry = self._catalog_by_name.get(name)
-        if entry is None:
-            return
-        entry["downloaded"] = False
-        item = self.model_items.get(name)
-        if item:
-            item.title = self._model_item_label(entry)
-        self._refresh_delete_menu()
+        另一個介面看到的狀態都是一致的）。這是 Flask request thread
+        呼叫進來的，一樣要透過 AppHelper.callAfter() 排回主執行緒。"""
+        def apply():
+            entry = self._catalog_by_name.get(name)
+            if entry is None:
+                return
+            entry["downloaded"] = False
+            item = self.model_items.get(name)
+            if item:
+                item.title = self._model_item_label(entry)
+            self._refresh_delete_menu()
+        AppHelper.callAfter(apply)
 
     def _refresh_delete_menu(self):
         """重建「刪除已下載模型」子選單的內容：只列出目前已下載、而且
@@ -1029,22 +781,31 @@ class TaggerMenuBarApp(rumps.App):
         _refresh_delete_menu() 時如果直接呼叫 .clear()，底層 NSMenu
         還是 None，會直接丟 AttributeError 把整個呼叫端（包含 Flask
         的 /delete_model request handler）搞掛掉。用 len() 判斷有沒有
-        東西可清，避免在從沒 add 過的狀態下呼叫 clear()。"""
-        if len(self.delete_menu):
-            self.delete_menu.clear()
-        current = self.settings.get("model")
-        deletable = [
-            (name, entry) for name, entry in self._catalog_by_name.items()
-            if entry["downloaded"] and name != current
-        ]
-        if not deletable:
-            placeholder = rumps.MenuItem("（沒有可以刪除的模型）")
-            placeholder.set_callback(None)
-            self.delete_menu.add(placeholder)
-            return
-        for name, entry in deletable:
-            item = rumps.MenuItem(entry["label"], callback=self._make_delete_callback(name))
-            self.delete_menu.add(item)
+        東西可清，避免在從沒 add 過的狀態下呼叫 clear()。
+
+        這個方法會被背景執行緒直接呼叫（_delete_model()、
+        _populate_model_menu() 的背景 thread），也會被已經在主執行緒
+        跑的 apply() closure 呼叫（on_download_complete() 等）——不管
+        呼叫端在哪個執行緒，這裡一律排進 AppHelper.callAfter()：已經在
+        主執行緒的情況下頂多是排到下一個 run loop tick 才執行，不影響
+        正確性；背景執行緒呼叫的情況下這就是唯一安全的做法。"""
+        def apply():
+            if len(self.delete_menu):
+                self.delete_menu.clear()
+            current = self.settings.get("model")
+            deletable = [
+                (name, entry) for name, entry in self._catalog_by_name.items()
+                if entry["downloaded"] and name != current
+            ]
+            if not deletable:
+                placeholder = rumps.MenuItem("（沒有可以刪除的模型）")
+                placeholder.set_callback(None)
+                self.delete_menu.add(placeholder)
+                return
+            for name, entry in deletable:
+                item = rumps.MenuItem(entry["label"], callback=self._make_delete_callback(name))
+                self.delete_menu.add(item)
+        AppHelper.callAfter(apply)
 
     def _make_delete_callback(self, name):
         def callback(_):
@@ -1072,9 +833,14 @@ class TaggerMenuBarApp(rumps.App):
         backend_server._model_cache.pop(name, None)
         backend_server._download_progress.pop(name, None)
         entry["downloaded"] = False
-        item = self.model_items.get(name)
-        if item:
-            item.title = self._model_item_label(entry)
+        # 這支方法本身是在 _make_delete_callback() 開的背景執行緒裡跑的，
+        # 下面兩個都是 NSMenuItem 操作，要排回主執行緒（_refresh_delete_menu()
+        # 自己也會 callAfter，這裡沒有重複包）。
+        def apply():
+            item = self.model_items.get(name)
+            if item:
+                item.title = self._model_item_label(entry)
+        AppHelper.callAfter(apply)
         self._refresh_delete_menu()
         rumps.notification("中文人名標示", "", f"已刪除模型 {entry['label']}")
 
@@ -1134,13 +900,18 @@ class TaggerMenuBarApp(rumps.App):
             self.settings["model"] = status.get("default") or next(
                 iter(self._catalog_by_name)
             )
-        for name, entry in self._catalog_by_name.items():
-            item = rumps.MenuItem(
-                self._model_item_label(entry), callback=self._make_model_callback(name)
-            )
-            item.state = 1 if name == self.settings["model"] else 0
-            self.model_items[name] = item
-            self.model_menu.add(item)
+        # 這支方法整支是背景執行緒跑的（見呼叫端 threading.Thread(...)），
+        # 下面建立 MenuItem、加進 model_menu 都是 NSMenu 操作，要排回
+        # 主執行緒。
+        def apply():
+            for name, entry in self._catalog_by_name.items():
+                item = rumps.MenuItem(
+                    self._model_item_label(entry), callback=self._make_model_callback(name)
+                )
+                item.state = 1 if name == self.settings["model"] else 0
+                self.model_items[name] = item
+                self.model_menu.add(item)
+        AppHelper.callAfter(apply)
 
         self._refresh_delete_menu()
 
@@ -1178,8 +949,17 @@ class TaggerMenuBarApp(rumps.App):
                 return False
 
         item = self.model_items.get(name)
-        if item:
-            item.title = f"{entry['label']}（下載中… 0%）"
+
+        # 這支方法整支是背景執行緒跑的（見上面 docstring），下面每一次
+        # item.title = ... 都是 NSMenuItem 操作，要排回主執行緒——包成
+        # 一個小函式減少重複，同時用預設參數 t=text 避免 lambda 在迴圈裡
+        # 常見的「延遲繫結」陷阱（迴圈跑完才執行的話，所有 lambda 會共用
+        # 同一個外層變數的最終值，不是各自呼叫當下的值）。
+        def set_title(text):
+            if item:
+                AppHelper.callAfter(lambda t=text: setattr(item, "title", t))
+
+        set_title(f"{entry['label']}（下載中… 0%）")
         rumps.notification("中文人名標示", "", f"正在下載模型 {entry['label']}…")
 
         # start_download() 只負責啟動背景執行緒，立刻回傳——真正的下載
@@ -1192,8 +972,7 @@ class TaggerMenuBarApp(rumps.App):
         except Exception as e:
             print(f"[_download_model] exception: {e!r}", flush=True)
             show_dialog(f"模型下載失敗：{e}")
-            if item:
-                item.title = self._model_item_label(entry)
+            set_title(self._model_item_label(entry))
             return False
 
         last_pct = -1
@@ -1207,15 +986,14 @@ class TaggerMenuBarApp(rumps.App):
                 pct = int(progress.get("downloaded", 0) * 100 / total)
                 if pct != last_pct:
                     last_pct = pct
-                    item.title = f"{entry['label']}（下載中… {pct}%）"
+                    set_title(f"{entry['label']}（下載中… {pct}%）")
             if progress.get("done"):
                 if progress.get("error"):
                     show_dialog(
                         f"模型下載失敗：{progress['error']}\n\n"
                         "可以從選單列「模型版本」重試，如果同樣的錯誤反覆出現，代表不是暫時性問題。"
                     )
-                    if item:
-                        item.title = self._model_item_label(entry)
+                    set_title(self._model_item_label(entry))
                     return False
                 break
 
@@ -1238,8 +1016,13 @@ class TaggerMenuBarApp(rumps.App):
         if entry and not entry["downloaded"]:
             if not self._download_model(name, ask_first=True):
                 return
-        for other_name, item in self.model_items.items():
-            item.state = 1 if other_name == name else 0
+        # 這支方法是背景執行緒跑的（見 _make_model_callback 用
+        # threading.Thread 呼叫），下面的 .state 賦值是 NSMenuItem
+        # 操作，排回主執行緒。
+        def apply():
+            for other_name, item in self.model_items.items():
+                item.state = 1 if other_name == name else 0
+        AppHelper.callAfter(apply)
         self.settings["model"] = name
         save_settings(self.settings)
         self._refresh_delete_menu()
