@@ -26,6 +26,15 @@
       "sha256": "2b1ee9fc4bf4efb13f1377b730ed738b328f5d6ec6be01f582a814d3a8065d8f",
       "size_bytes": 377359895,
       "default": false
+    },
+    {
+      "name": "model_bert_colab_v6e",
+      "label": "colab_v6e（日文姓氏字元碰撞已修好；音譯人名中無分隔符的單詞式姓名仍不穩定，實驗性）",
+      "version": 3,
+      "url": "https://github.com/zensworkspace001-afk/chinese-name-tagger/releases/download/models-v1/model_bert_colab_v6e.zip",
+      "sha256": "3515fcab0429b8df99837d278bd6b45dae7cc95bb4097aaaf378d77e1848ee52",
+      "size_bytes": 377358758,
+      "default": false
     }
   ]
 }
