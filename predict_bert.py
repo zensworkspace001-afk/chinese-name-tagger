@@ -346,6 +346,96 @@ def local_diffusion(doc_tagged, confirmed_names):
     return new_doc
 
 
+def _find_nonO_runs(doc_tagged):
+    """把每句話切成「最大連續非 O 字元區段」（run），回傳 dict list：
+    {sent_idx, start, end, text, tags, coherent, type}。
+    coherent 的判斷：把這段 run 自己丟進 extract_entities()，如果剛好解析成
+    「一個」實體、而且那個實體的文字長度跟整段 run 的長度一樣長，代表這段
+    run 從頭到尾是同一個家族的標籤（純 JPN、純 FOR，或是合法的 SUR→GIV
+    銜接），沒有中途斷裂或混雜家族；否則就是「破碎/雜訊」預測（例如
+    B-JPN 後面接 I-SUR 這種同一段裡混了兩種家族標籤的情況），不當作
+    多數決的有效票。"""
+    runs = []
+    for sent_idx, (sentence, tagged) in enumerate(doc_tagged):
+        chars = [c for c, _ in tagged]
+        tags = [t for _, t in tagged]
+        n = len(tags)
+        i = 0
+        while i < n:
+            if tags[i] != "O":
+                j = i
+                while j < n and tags[j] != "O":
+                    j += 1
+                run_chars, run_tags = chars[i:j], tags[i:j]
+                text = "".join(run_chars)
+                ents = extract_entities(list(zip(run_chars, run_tags)))
+                coherent = len(ents) == 1 and len(ents[0]["text"]) == len(text)
+                runs.append({
+                    "sent_idx": sent_idx, "start": i, "end": j,
+                    "text": text, "tags": run_tags,
+                    "coherent": coherent,
+                    "type": ents[0]["type"] if coherent else None,
+                })
+                i = j
+            else:
+                i += 1
+    return runs
+
+
+def reconcile_type_conflicts(doc_tagged):
+    """篇章級後處理第三步：同一個字串在文章裡不同地方出現，卻被標成不同
+    類型（例如「小林誠」某處標對 B-JPN 整段，另一處卻標成中文姓/名切分甚至
+    中途斷裂），global_diffusion/local_diffusion 都不處理這種「兩處都有
+    標籤、但彼此衝突」的狀況（它們只處理「完全沒標到」或「中文半個名字」）。
+
+    做法：同一字串的所有出現裡，只採計「乾淨」(coherent，見
+    _find_nonO_runs()) 的那些當作投票，票數最高的類型當作這個字串在全文
+    的正確樣板，其餘出現（不管是雜訊斷裂還是乾淨但少數的類型）全部覆寫成
+    同一個標籤樣板。
+
+    已知限制：如果模型對某個字串「乾淨但持續標錯」的次數比標對的次數還
+    多（例如同一姓氏字元在訓練資料裡中文用法遠多於日文用法，模型該次
+    多數表決反而會選到錯的那個多數），單純多數決無法救回來——這種情況
+    要靠補訓練資料修正模型本身，不是這裡的後處理範圍。"""
+    runs = _find_nonO_runs(doc_tagged)
+    by_text = {}
+    for r in runs:
+        by_text.setdefault(r["text"], []).append(r)
+
+    canonical = {}
+    for text, rs in by_text.items():
+        if len(rs) < 2:
+            continue
+        coherent_rs = [r for r in rs if r["coherent"]]
+        if not coherent_rs:
+            continue  # 沒有任何乾淨版本可以參考，無法安全判斷，維持原樣
+        if len(coherent_rs) == len(rs) and len({r["type"] for r in coherent_rs}) == 1:
+            continue  # 已經完全一致，不用動
+
+        type_counts, first_seen = {}, {}
+        for r in coherent_rs:
+            type_counts[r["type"]] = type_counts.get(r["type"], 0) + 1
+            first_seen.setdefault(r["type"], r)
+        best = max(type_counts.values())
+        tied = [t for t, c in type_counts.items() if c == best]
+        majority_type = min(tied, key=lambda t: (first_seen[t]["sent_idx"], first_seen[t]["start"]))
+        canonical[text] = first_seen[majority_type]["tags"]
+
+    new_doc = [(s, list(tg)) for s, tg in doc_tagged]
+    for text, rs in by_text.items():
+        if text not in canonical:
+            continue
+        pattern = canonical[text]
+        for r in rs:
+            if r["tags"] != pattern:
+                sentence, tagged = new_doc[r["sent_idx"]]
+                chars = [c for c, _ in tagged]
+                tags = [t for _, t in tagged]
+                tags[r["start"]:r["end"]] = pattern
+                new_doc[r["sent_idx"]] = (sentence, list(zip(chars, tags)))
+    return new_doc
+
+
 def predict_document(sentences, model, tokenizer, rounds=1):
     """對一整篇文章（多句話）做逐句預測 + 篇章級全局/局部擴散後處理。
     回傳 [(sentence, tagged, entities), ...]，entities 是 extract_entities()
@@ -354,13 +444,16 @@ def predict_document(sentences, model, tokenizer, rounds=1):
     global diffusion（跨句召回同一個已確認實體）用 global_diffusion_multi()，
     CN/FOR/JPN 三種都處理；local diffusion（修補「有姓無名」/「有名無姓」
     的殘缺 CN 姓名）維持只處理 CN——FOR/JPN 是整段不切邊界的單一實體，
-    沒有「半個實體」這種殘缺狀態可以修補，套用 local diffusion 沒有意義。"""
+    沒有「半個實體」這種殘缺狀態可以修補，套用 local diffusion 沒有意義。
+    最後跑一次 reconcile_type_conflicts()，處理前兩者都不管的「同一字串、
+    不同地方標成不同類型」的衝突（見該函式 docstring 的已知限制）。"""
     doc_tagged = [(s, predict(s, model, tokenizer)) for s in sentences]
     for _ in range(rounds):
         confirmed = collect_confirmed_entities(doc_tagged)
         doc_tagged = global_diffusion_multi(doc_tagged, confirmed)
         confirmed_cn = collect_confirmed_entities(doc_tagged)["CN"]
         doc_tagged = local_diffusion(doc_tagged, confirmed_cn)
+    doc_tagged = reconcile_type_conflicts(doc_tagged)
     return [(s, tagged, extract_entities(tagged)) for s, tagged in doc_tagged]
 
 

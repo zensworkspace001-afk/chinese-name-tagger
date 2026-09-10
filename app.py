@@ -26,6 +26,7 @@ MODEL_LABELS = {
     "model_bert_v4": "v4（原始推薦版本，只認中文姓名）",
     "model_bert_colab_v5": "colab_v5（中文姓名最佳版本，目前預設）",
     "model_bert_colab_v6b": "colab_v6b（新增外語音譯／日文人名，這兩類仍在驗證中，中文姓名部分含少數歷史/武俠人名尚未修好）",
+    "model_bert_colab_v6e": "colab_v6e（日文姓氏字元碰撞問題已修好且穩定；音譯人名中無分隔符的單詞式姓名（如「理查德」）仍不穩定，同批名字換一次訓練會忽好忽壞；日文姓名在長句中段仍會漏標最後一個字）",
 }
 
 TAG_COLOR = {
